@@ -1,30 +1,30 @@
-# Changelog
+# 更新日志
 
-All notable changes to this project will be documented in this file.
+这个文件记录项目的主要公开变更。
 
-The format is based on Keep a Changelog and this project uses semantic versioning.
+格式参考 Keep a Changelog，并遵循语义化版本号。
 
 ## [1.0.0] - 2026-04-06
 
-### Added
+### 新增
 
-- Initial public release of Pro Auto Clicker for Windows.
-- Mouse automation with left, right, and middle click support.
-- Keyboard automation with single-key and modifier-combination repeat actions.
-- Two mouse target modes: delayed capture of the current cursor position and fixed coordinates.
-- Local preset save, load, import, and export support with JSON files.
-- Global hotkeys, app-only hotkeys, system tray support, and PyInstaller packaging.
+- 发布首个面向 Windows 的公开版本。
+- 支持鼠标左键、右键、中键自动连点。
+- 支持键盘单键与组合键连发。
+- 提供两种鼠标目标模式：启动后延时记录当前位置、固定坐标。
+- 支持本地预设的保存、加载、导入与导出，格式为 JSON。
+- 支持全局热键、仅应用内热键、系统托盘和 PyInstaller 打包。
 
-### Changed
+### 变更
 
-- Simplified the action model into mouse mode and keyboard mode.
-- Simplified the interface by hiding irrelevant settings based on the active mode.
-- Moved language switching into the top menu bar next to the main application menus.
-- Added full Simplified Chinese, Traditional Chinese, and English localization for the app UI and README.
-- Restored the last-used working configuration and interface language when reopening the app.
+- 将动作模型简化为鼠标模式与键盘模式。
+- 根据当前模式自动隐藏无关设置，界面更简洁。
+- 将语言切换入口移到顶部菜单栏，与主菜单并列展示。
+- 为应用界面和 README 补全简体中文、繁體中文、English 三语支持。
+- 启动时恢复上次实际使用的工作配置与界面语言。
 
-### Fixed
+### 修复
 
-- Hardened settings parsing and preset import handling for malformed saved data.
-- Fixed startup and runtime UI issues caused by incomplete window wiring.
-- Added regression coverage for state restore, mode switching, target-row visibility, and localization behavior.
+- 加强损坏配置和异常预设数据的解析容错。
+- 修复因窗口初始化未完成而导致的启动与运行时界面问题。
+- 增加状态恢复、模式切换、目标参数显隐和多语言行为的回归测试覆盖。

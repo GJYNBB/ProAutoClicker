@@ -49,9 +49,31 @@ jobs:
             dist/ProAutoClicker
             dist/ProAutoClicker-windows.zip
 
+      - name: Prepare Release Notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $content = Get-Content -Raw -Encoding UTF8 .\CHANGELOG.md
+          $pattern = "(?ms)^## \[$([regex]::Escape($version))\] - .*?(?=^## \[|\z)"
+          $section = [regex]::Match($content, $pattern).Value.Trim()
+
+          if ([string]::IsNullOrWhiteSpace($section)) {
+            $section = @"
+          ## [$version] - $(Get-Date -Format 'yyyy-MM-dd')
+
+          ### 发布说明
+
+          - 已自动生成 Windows 构建产物 `ProAutoClicker-windows.zip`
+          - 详细变更请查看仓库中的 `CHANGELOG.md`
+          "@.Trim()
+          }
+
+          Set-Content -Path .\release-notes.md -Value $section -Encoding UTF8
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/ProAutoClicker-windows.zip
-          generate_release_notes: true
+          body_path: release-notes.md
