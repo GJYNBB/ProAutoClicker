@@ -51,6 +51,23 @@ class AppSettingsParsingTests(unittest.TestCase):
         self.assertEqual(state.selected_preset, "預設")
         self.assertEqual(state.presets[0].name, "預設")
 
+    def test_persisted_state_normalizes_overlay_settings(self) -> None:
+        state = PersistedState.from_dict(
+            {
+                "overlay": {
+                    "hud_enabled": "true",
+                    "hud_items": [],
+                    "hud_x": "bad",
+                    "hud_y": -10,
+                }
+            }
+        )
+
+        self.assertTrue(state.overlay.hud_enabled)
+        self.assertEqual(state.overlay.hud_items, ("state",))
+        self.assertEqual(state.overlay.hud_x, 24)
+        self.assertEqual(state.overlay.hud_y, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

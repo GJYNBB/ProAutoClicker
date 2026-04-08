@@ -12,6 +12,7 @@ ACTION_CHOICES = ("mouse", "keyboard")
 MOUSE_BUTTON_CHOICES = ("left", "right", "middle")
 TARGET_CHOICES = ("capture", "fixed")
 HOTKEY_SCOPE_CHOICES = ("global", "application")
+HUD_ITEM_CHOICES = ("state", "rate", "count")
 
 LEGACY_MOUSE_ACTIONS = {
     "mouse_left": "left",
@@ -34,6 +35,10 @@ def get_target_labels(language: str | None) -> dict[str, str]:
 
 def get_hotkey_scope_labels(language: str | None) -> dict[str, str]:
     return choice_labels(language, "hotkey_scope", HOTKEY_SCOPE_CHOICES)
+
+
+def get_hud_item_labels(language: str | None) -> dict[str, str]:
+    return choice_labels(language, "hud_item", HUD_ITEM_CHOICES)
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -86,6 +91,19 @@ def _normalize_action_fields(action_mode: Any, mouse_button: Any) -> tuple[str, 
         normalized_button = "left"
 
     return normalized_mode, normalized_button
+
+
+def _normalize_hud_items(items: Any) -> tuple[str, ...]:
+    if not isinstance(items, (list, tuple, set)):
+        items = []
+    normalized: list[str] = []
+    for item in items:
+        text = str(item or "")
+        if text in HUD_ITEM_CHOICES and text not in normalized:
+            normalized.append(text)
+    if not normalized:
+        normalized.append("state")
+    return tuple(normalized[: len(HUD_ITEM_CHOICES)])
 
 
 @dataclass(frozen=True)
@@ -212,11 +230,39 @@ class Preset:
 
 
 @dataclass
+class OverlaySettings:
+    hud_enabled: bool = False
+    hud_items: tuple[str, ...] = field(default_factory=lambda: ("state", "rate", "count"))
+    hud_x: int = 24
+    hud_y: int = 24
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "hud_enabled": self.hud_enabled,
+            "hud_items": list(self.hud_items),
+            "hud_x": self.hud_x,
+            "hud_y": self.hud_y,
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any] | None) -> "OverlaySettings":
+        if not isinstance(data, dict):
+            return OverlaySettings()
+        return OverlaySettings(
+            hud_enabled=_coerce_bool(data.get("hud_enabled", False), False),
+            hud_items=_normalize_hud_items(data.get("hud_items")),
+            hud_x=max(_coerce_int(data.get("hud_x", 24), 24), 0),
+            hud_y=max(_coerce_int(data.get("hud_y", 24), 24), 0),
+        )
+
+
+@dataclass
 class PersistedState:
-    schema_version: int = 2
+    schema_version: int = 3
     language: str = field(default_factory=detect_system_language)
     selected_preset: str = field(default_factory=default_preset_name)
     last_settings: AppSettings = field(default_factory=AppSettings)
+    overlay: OverlaySettings = field(default_factory=OverlaySettings)
     presets: list[Preset] = field(default_factory=lambda: [Preset(name=default_preset_name(), settings=AppSettings())])
 
     def to_dict(self) -> dict[str, Any]:
@@ -225,6 +271,7 @@ class PersistedState:
             "language": self.language,
             "selected_preset": self.selected_preset,
             "last_settings": self.last_settings.to_dict(),
+            "overlay": self.overlay.to_dict(),
             "presets": [preset.to_dict() for preset in self.presets],
         }
 
@@ -242,10 +289,11 @@ class PersistedState:
         if not presets:
             presets = [Preset(name=fallback_name, settings=AppSettings())]
         return PersistedState(
-            schema_version=_coerce_int(data.get("schema_version", 2), 2),
+            schema_version=_coerce_int(data.get("schema_version", 3), 3),
             language=language,
             selected_preset=str(data.get("selected_preset", fallback_name)).strip() or fallback_name,
             last_settings=AppSettings.from_dict(data.get("last_settings")),
+            overlay=OverlaySettings.from_dict(data.get("overlay")),
             presets=presets,
         )
 

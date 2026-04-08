@@ -16,6 +16,7 @@ class AutomationController(QObject):
     error_occurred = Signal(str)
     position_captured = Signal(int, int)
     action_count_changed = Signal(int)
+    actual_frequency_changed = Signal(float)
 
     def __init__(self) -> None:
         super().__init__()
@@ -24,6 +25,7 @@ class AutomationController(QObject):
         self._stop_event: threading.Event | None = None
         self._lock = threading.Lock()
         self._action_count = 0
+        self._run_started_at: float | None = None
         self._language = detect_system_language()
 
     @property
@@ -40,7 +42,8 @@ class AutomationController(QObject):
             if self._worker is not None and self._worker.is_alive():
                 return
             self._action_count = 0
-            self.action_count_changed.emit(0)
+            self._run_started_at = None
+            self._emit_runtime_metrics(force_zero=True)
             self._stop_event = threading.Event()
             self._worker = threading.Thread(
                 target=self._run_session,
@@ -54,6 +57,7 @@ class AutomationController(QObject):
             stop_event = self._stop_event
         if stop_event is not None:
             stop_event.set()
+        self._emit_runtime_metrics(force_zero=True)
         self._set_state("paused", tr(self._language, "controller.paused"))
 
     def shutdown(self) -> None:
@@ -61,6 +65,7 @@ class AutomationController(QObject):
             stop_event = self._stop_event
         if stop_event is not None:
             stop_event.set()
+        self._emit_runtime_metrics(force_zero=True)
         self._set_state("idle", tr(self._language, "status.ready"))
 
     def toggle(self, settings: AppSettings, language: str | None = None) -> None:
@@ -99,6 +104,7 @@ class AutomationController(QObject):
             with self._lock:
                 self._worker = None
                 self._stop_event = None
+            self._emit_runtime_metrics(force_zero=True)
             if self._state == "running" and not stop_event.is_set():
                 self._set_state("idle", tr(language, "status.ready"))
 
@@ -129,8 +135,9 @@ class AutomationController(QObject):
         language: str,
     ) -> None:
         interval = 1.0 / settings.frequency_hz
-        next_run = time.perf_counter()
-        last_count_emit = 0.0
+        self._run_started_at = time.perf_counter()
+        next_run = self._run_started_at
+        last_metrics_emit = self._run_started_at
 
         while not stop_event.is_set():
             if settings.action_mode == "mouse":
@@ -142,9 +149,9 @@ class AutomationController(QObject):
 
             self._action_count += 1
             now = time.perf_counter()
-            if now - last_count_emit >= 0.25:
-                self.action_count_changed.emit(self._action_count)
-                last_count_emit = now
+            if now - last_metrics_emit >= 0.25:
+                self._emit_runtime_metrics(now=now)
+                last_metrics_emit = now
 
             next_run += interval
             sleep_for = next_run - time.perf_counter()
@@ -152,6 +159,18 @@ class AutomationController(QObject):
                 time.sleep(min(sleep_for, 0.2))
             else:
                 next_run = time.perf_counter()
+
+    def _emit_runtime_metrics(self, now: float | None = None, *, force_zero: bool = False) -> None:
+        self.action_count_changed.emit(self._action_count)
+        if force_zero or self._run_started_at is None or self._action_count <= 0:
+            if force_zero:
+                self._run_started_at = None
+            self.actual_frequency_changed.emit(0.0)
+            return
+
+        current_time = now if now is not None else time.perf_counter()
+        elapsed = max(current_time - self._run_started_at, 1e-9)
+        self.actual_frequency_changed.emit(self._action_count / elapsed)
 
     def _set_state(self, state: str, status: str) -> None:
         self._state = state

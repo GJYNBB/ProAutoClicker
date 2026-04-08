@@ -14,6 +14,12 @@ ULONG_PTR = getattr(wintypes, "ULONG_PTR", ctypes.c_size_t)
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
+INPUT_MOUSE = 0
+INPUT_KEYBOARD = 1
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
@@ -24,12 +30,15 @@ HOTKEY_ID_TOGGLE = 1
 HOTKEY_ID_EXIT = 2
 
 KEYEVENTF_KEYUP = 0x0002
+MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
 
 MODIFIER_FLAG_BY_NAME = {
     "Alt": MOD_ALT,
@@ -71,17 +80,62 @@ class MSG(ctypes.Structure):
     ]
 
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", wintypes.DWORD),
+        ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    ]
+
+
+class INPUT_UNION(ctypes.Union):
+    _fields_ = [
+        ("mi", MOUSEINPUT),
+        ("ki", KEYBDINPUT),
+        ("hi", HARDWAREINPUT),
+    ]
+
+
+class INPUT(ctypes.Structure):
+    _anonymous_ = ("union",)
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("union", INPUT_UNION),
+    ]
+
+
+LPINPUT = ctypes.POINTER(INPUT)
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
 user32.GetCursorPos.restype = wintypes.BOOL
-user32.SetCursorPos.argtypes = [wintypes.INT, wintypes.INT]
-user32.SetCursorPos.restype = wintypes.BOOL
-user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ULONG_PTR]
-user32.mouse_event.restype = None
-user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ULONG_PTR]
-user32.keybd_event.restype = None
+user32.GetSystemMetrics.argtypes = [wintypes.INT]
+user32.GetSystemMetrics.restype = wintypes.INT
+user32.SendInput.argtypes = [wintypes.UINT, LPINPUT, ctypes.c_int]
+user32.SendInput.restype = wintypes.UINT
 user32.RegisterHotKey.argtypes = [wintypes.HWND, wintypes.INT, wintypes.UINT, wintypes.UINT]
 user32.RegisterHotKey.restype = wintypes.BOOL
 user32.UnregisterHotKey.argtypes = [wintypes.HWND, wintypes.INT]
@@ -94,6 +148,80 @@ kernel32.GetCurrentThreadId.argtypes = []
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
 
+def _mouse_input(flags: int) -> INPUT:
+    event = INPUT(type=INPUT_MOUSE)
+    event.mi = MOUSEINPUT(dwFlags=flags)
+    return event
+
+
+def _keyboard_input(vk: int, flags: int = 0) -> INPUT:
+    event = INPUT(type=INPUT_KEYBOARD)
+    event.ki = KEYBDINPUT(wVk=vk, dwFlags=flags)
+    return event
+
+
+def _build_mouse_click_inputs(action_mode: str) -> tuple[INPUT, INPUT]:
+    down_flag, up_flag = MOUSE_FLAGS[action_mode]
+    return _mouse_input(down_flag), _mouse_input(up_flag)
+
+
+def _get_virtual_screen_metrics() -> tuple[int, int, int, int]:
+    left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    top = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    width = max(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN), 1)
+    height = max(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN), 1)
+    return left, top, width, height
+
+
+def _normalize_absolute_coordinate(value: int, origin: int, span: int) -> int:
+    if span <= 1:
+        return 0
+    normalized = round((value - origin) * 65535 / (span - 1))
+    return max(0, min(65535, normalized))
+
+
+def _build_mouse_move_input(x: int, y: int) -> INPUT:
+    left, top, width, height = _get_virtual_screen_metrics()
+    event = INPUT(type=INPUT_MOUSE)
+    event.mi = MOUSEINPUT(
+        dx=_normalize_absolute_coordinate(x, left, width),
+        dy=_normalize_absolute_coordinate(y, top, height),
+        dwFlags=MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+    )
+    return event
+
+
+def _build_key_combo_inputs(combo: KeyCombo, language: str | None = None) -> tuple[INPUT, ...]:
+    locale_key = normalize_language(language)
+    normalized = combo.normalized()
+    vk = key_name_to_vk(normalized.key)
+    if vk is None:
+        raise OSError(tr(locale_key, "error.unsupported_keyboard_action"))
+
+    inputs: list[INPUT] = []
+    for modifier in normalized.modifiers:
+        inputs.append(_keyboard_input(MODIFIER_VK_BY_NAME[modifier]))
+    inputs.append(_keyboard_input(vk))
+    inputs.append(_keyboard_input(vk, KEYEVENTF_KEYUP))
+    for modifier in reversed(normalized.modifiers):
+        inputs.append(_keyboard_input(MODIFIER_VK_BY_NAME[modifier], KEYEVENTF_KEYUP))
+    return tuple(inputs)
+
+
+def _send_inputs(*inputs: INPUT) -> None:
+    input_count = len(inputs)
+    if input_count == 0:
+        return
+
+    payload = (INPUT * input_count)(*inputs)
+    sent = user32.SendInput(input_count, payload, ctypes.sizeof(INPUT))
+    if sent != input_count:
+        error = ctypes.get_last_error()
+        if error:
+            raise ctypes.WinError(error)
+        raise OSError("SendInput failed.")
+
+
 def get_cursor_position() -> tuple[int, int] | None:
     point = POINT()
     if not user32.GetCursorPos(ctypes.byref(point)):
@@ -102,24 +230,11 @@ def get_cursor_position() -> tuple[int, int] | None:
 
 
 def click_mouse(action_mode: str, x: int, y: int) -> None:
-    flags = MOUSE_FLAGS[action_mode]
-    user32.SetCursorPos(x, y)
-    user32.mouse_event(flags[0], 0, 0, 0, 0)
-    user32.mouse_event(flags[1], 0, 0, 0, 0)
+    _send_inputs(_build_mouse_move_input(x, y), *_build_mouse_click_inputs(action_mode))
 
 
 def send_key_combo(combo: KeyCombo, language: str | None = None) -> None:
-    locale_key = normalize_language(language)
-    normalized = combo.normalized()
-    vk = key_name_to_vk(normalized.key)
-    if vk is None:
-        raise OSError(tr(locale_key, "error.unsupported_keyboard_action"))
-    for modifier in normalized.modifiers:
-        user32.keybd_event(MODIFIER_VK_BY_NAME[modifier], 0, 0, 0)
-    user32.keybd_event(vk, 0, 0, 0)
-    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-    for modifier in reversed(normalized.modifiers):
-        user32.keybd_event(MODIFIER_VK_BY_NAME[modifier], 0, KEYEVENTF_KEYUP, 0)
+    _send_inputs(*_build_key_combo_inputs(combo, language))
 
 
 def hotkey_to_win32(combo: KeyCombo, language: str | None = None) -> tuple[int, int]:

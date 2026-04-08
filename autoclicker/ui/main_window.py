@@ -38,10 +38,12 @@ from autoclicker.controller import AutomationController
 from autoclicker.i18n import app_display_name, build_help_html, default_preset_name, language_items, normalize_language, tr
 from autoclicker.models import (
     AppSettings,
+    OverlaySettings,
     PersistedState,
     Preset,
     format_action_label,
     get_action_labels,
+    get_hud_item_labels,
     get_hotkey_scope_labels,
     get_mouse_button_labels,
     get_target_labels,
@@ -50,6 +52,7 @@ from autoclicker.models import (
 from autoclicker.resources import load_app_icon
 from autoclicker.store import SettingsStore
 from autoclicker.ui.hotkey_edit import HotkeyLineEdit
+from autoclicker.ui.status_hud import StatusHudWindow
 from autoclicker.win32_backend import GlobalHotkeyManager, get_cursor_position
 
 
@@ -63,7 +66,12 @@ class MainWindow(QMainWindow):
         self._language = normalize_language(self._persisted_state.language)
         self._controller.set_language(self._language)
         self._presets = {preset.name: preset for preset in self._persisted_state.presets}
+        self._overlay_settings = self._persisted_state.overlay
+        self._hud_window = StatusHudWindow()
         self._current_target: tuple[int, int] | None = None
+        self._action_count = 0
+        self._actual_frequency = 0.0
+        self._controller_state = self._controller.state
         self._local_shortcuts: list[QShortcut] = []
         self._loading = False
         self._tray_notice_shown = False
@@ -245,7 +253,51 @@ class MainWindow(QMainWindow):
         group = QGroupBox()
         layout = QVBoxLayout(group)
         self.minimize_to_tray_checkbox = QCheckBox()
+        self.enable_hud_checkbox = QCheckBox()
+        self.hud_items_label = QLabel()
+        self.hud_position_label = QLabel()
+        self.hud_hint_label = QLabel()
+        self.hud_hint_label.setWordWrap(True)
+        self.hud_hint_label.setStyleSheet("color: #5f7285;")
+        self.hud_state_checkbox = QCheckBox()
+        self.hud_rate_checkbox = QCheckBox()
+        self.hud_count_checkbox = QCheckBox()
+        self.hud_item_checkboxes = {
+            "state": self.hud_state_checkbox,
+            "rate": self.hud_rate_checkbox,
+            "count": self.hud_count_checkbox,
+        }
+        hud_items_row = QWidget()
+        hud_items_layout = QHBoxLayout(hud_items_row)
+        hud_items_layout.setContentsMargins(0, 0, 0, 0)
+        hud_items_layout.setSpacing(8)
+        for checkbox in self.hud_item_checkboxes.values():
+            hud_items_layout.addWidget(checkbox)
+        hud_items_layout.addStretch(1)
+
+        self.hud_x_spin = QSpinBox()
+        self.hud_x_spin.setRange(0, 99999)
+        self.hud_y_spin = QSpinBox()
+        self.hud_y_spin.setRange(0, 99999)
+        self.hud_position_row = QWidget()
+        hud_position_layout = QHBoxLayout(self.hud_position_row)
+        hud_position_layout.setContentsMargins(0, 0, 0, 0)
+        hud_position_layout.setSpacing(8)
+        hud_position_layout.addWidget(QLabel("X"))
+        hud_position_layout.addWidget(self.hud_x_spin)
+        hud_position_layout.addWidget(QLabel("Y"))
+        hud_position_layout.addWidget(self.hud_y_spin)
+        hud_position_layout.addStretch(1)
+
+        hud_form = QFormLayout()
+        hud_form.setContentsMargins(0, 0, 0, 0)
+        hud_form.addRow(self.hud_items_label, hud_items_row)
+        hud_form.addRow(self.hud_position_label, self.hud_position_row)
+
         layout.addWidget(self.minimize_to_tray_checkbox)
+        layout.addWidget(self.enable_hud_checkbox)
+        layout.addLayout(hud_form)
+        layout.addWidget(self.hud_hint_label)
         return group
 
     def _build_controls_group(self) -> QGroupBox:
@@ -279,11 +331,13 @@ class MainWindow(QMainWindow):
         layout = QFormLayout(group)
 
         self.state_label = QLabel()
+        self.actual_frequency_label = QLabel()
         self.action_count_label = QLabel()
         self.target_position_label = QLabel()
         self.summary_label = QLabel()
 
         self.state_value = QLabel("0")
+        self.actual_frequency_value = QLabel("0")
         self.action_count_value = QLabel("0")
         self.target_value = QLabel("")
         self.summary_value = QLabel("")
@@ -291,6 +345,7 @@ class MainWindow(QMainWindow):
         self.summary_value.setStyleSheet("color: #415466;")
 
         layout.addRow(self.state_label, self.state_value)
+        layout.addRow(self.actual_frequency_label, self.actual_frequency_value)
         layout.addRow(self.action_count_label, self.action_count_value)
         layout.addRow(self.target_position_label, self.target_value)
         layout.addRow(self.summary_label, self.summary_value)
@@ -400,6 +455,11 @@ class MainWindow(QMainWindow):
         self.toggle_hotkey_edit.hotkey_changed.connect(self._on_form_changed)
         self.exit_hotkey_edit.hotkey_changed.connect(self._on_form_changed)
         self.minimize_to_tray_checkbox.stateChanged.connect(self._on_form_changed)
+        self.enable_hud_checkbox.stateChanged.connect(self._on_form_changed)
+        self.hud_x_spin.valueChanged.connect(self._on_form_changed)
+        self.hud_y_spin.valueChanged.connect(self._on_form_changed)
+        for checkbox in self.hud_item_checkboxes.values():
+            checkbox.stateChanged.connect(self._on_hud_item_changed)
 
         self.use_current_cursor_button.clicked.connect(self._fill_coordinates_from_cursor)
 
@@ -419,6 +479,7 @@ class MainWindow(QMainWindow):
         self._controller.error_occurred.connect(self._on_controller_error)
         self._controller.position_captured.connect(self._on_position_captured)
         self._controller.action_count_changed.connect(self._on_action_count_changed)
+        self._controller.actual_frequency_changed.connect(self._on_actual_frequency_changed)
 
         self._global_hotkeys.toggle_pressed.connect(self._handle_hotkey_toggle)
         self._global_hotkeys.exit_pressed.connect(self._handle_exit)
@@ -498,15 +559,25 @@ class MainWindow(QMainWindow):
         self.exit_hotkey_edit.setPlaceholderText(tr(self._language, "hint.hotkey_input"))
 
         self.minimize_to_tray_checkbox.setText(tr(self._language, "option.minimize_to_tray"))
+        self.enable_hud_checkbox.setText(tr(self._language, "option.hud_enabled"))
+        self.hud_items_label.setText(tr(self._language, "field.hud_items"))
+        self.hud_position_label.setText(tr(self._language, "field.hud_position"))
+        self.hud_hint_label.setText(tr(self._language, "hint.hud_items"))
+        hud_item_labels = get_hud_item_labels(self._language)
+        for key, checkbox in self.hud_item_checkboxes.items():
+            checkbox.setText(hud_item_labels[key])
 
         self.start_button.setText(tr(self._language, "button.start_resume"))
         self.pause_button.setText(tr(self._language, "button.pause"))
         self.exit_button.setText(tr(self._language, "button.exit"))
 
         self.state_label.setText(tr(self._language, "field.current_state"))
+        self.actual_frequency_label.setText(tr(self._language, "field.actual_frequency"))
         self.action_count_label.setText(tr(self._language, "field.action_count"))
         self.target_position_label.setText(tr(self._language, "field.target_position"))
         self.summary_label.setText(tr(self._language, "field.current_summary"))
+        self._render_actual_frequency()
+        self.action_count_value.setText(str(self._action_count))
 
         self.current_preset_label.setText(tr(self._language, "field.current_preset"))
         self.load_preset_button.setText(tr(self._language, "button.load"))
@@ -538,10 +609,23 @@ class MainWindow(QMainWindow):
         self._set_combo_items(self.mouse_button_combo, list(get_mouse_button_labels(self._language).items()), mouse_button)
         self._set_combo_items(self.target_mode_combo, list(get_target_labels(self._language).items()), target_mode)
         self._set_combo_items(self.hotkey_scope_combo, list(get_hotkey_scope_labels(self._language).items()), hotkey_scope)
+        self._sync_observability_views()
 
     def _load_initial_state(self) -> None:
         self._rebuild_preset_combo(self._persisted_state.selected_preset)
+        self._apply_overlay_settings_to_form(self._persisted_state.overlay)
         self._apply_settings_to_form(self._persisted_state.last_settings)
+
+    def _apply_overlay_settings_to_form(self, settings: OverlaySettings) -> None:
+        self._loading = True
+        try:
+            self.enable_hud_checkbox.setChecked(settings.hud_enabled)
+            self.hud_x_spin.setValue(settings.hud_x)
+            self.hud_y_spin.setValue(settings.hud_y)
+            for key, checkbox in self.hud_item_checkboxes.items():
+                checkbox.setChecked(key in settings.hud_items)
+        finally:
+            self._loading = False
 
     def _apply_settings_to_form(self, settings: AppSettings) -> None:
         self._loading = True
@@ -578,8 +662,21 @@ class MainWindow(QMainWindow):
             minimize_to_tray=self.minimize_to_tray_checkbox.isChecked(),
         )
 
+    def _selected_hud_items(self) -> tuple[str, ...]:
+        selected = tuple(key for key, checkbox in self.hud_item_checkboxes.items() if checkbox.isChecked())
+        return selected or ("state",)
+
+    def _collect_overlay_settings(self) -> OverlaySettings:
+        return OverlaySettings(
+            hud_enabled=self.enable_hud_checkbox.isChecked(),
+            hud_items=self._selected_hud_items(),
+            hud_x=self.hud_x_spin.value(),
+            hud_y=self.hud_y_spin.value(),
+        )
+
     def _refresh_form_state(self) -> None:
         settings = self._collect_settings()
+        self._overlay_settings = self._collect_overlay_settings()
         mouse_mode = settings.action_mode == "mouse"
         capture_mode = settings.target_mode == "capture"
         fixed_mode = settings.target_mode == "fixed"
@@ -596,6 +693,14 @@ class MainWindow(QMainWindow):
         self.fixed_y_spin.setEnabled(mouse_mode and fixed_mode)
         self.use_current_cursor_button.setEnabled(mouse_mode and fixed_mode)
         self.capture_delay_spin.setEnabled(mouse_mode and capture_mode)
+        hud_controls_enabled = self._overlay_settings.hud_enabled
+        self.hud_items_label.setEnabled(hud_controls_enabled)
+        self.hud_position_label.setEnabled(hud_controls_enabled)
+        self.hud_hint_label.setEnabled(hud_controls_enabled)
+        self.hud_x_spin.setEnabled(hud_controls_enabled)
+        self.hud_y_spin.setEnabled(hud_controls_enabled)
+        for checkbox in self.hud_item_checkboxes.values():
+            checkbox.setEnabled(hud_controls_enabled)
 
         errors = validate_settings(settings, self._language)
         self.validation_label.setText("\n".join(errors))
@@ -603,6 +708,7 @@ class MainWindow(QMainWindow):
         self._configure_hotkeys(settings, errors)
         self._save_persisted_state()
         self._on_state_changed(self._controller.state)
+        self._sync_observability_views()
 
     def _update_summary(self, settings: AppSettings) -> None:
         target_text = tr(self._language, "summary.target.not_applicable")
@@ -733,7 +839,22 @@ class MainWindow(QMainWindow):
             self._current_target = None
         self._refresh_form_state()
 
+    def _on_hud_item_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        if any(checkbox.isChecked() for checkbox in self.hud_item_checkboxes.values()):
+            self._on_form_changed()
+            return
+
+        self._loading = True
+        try:
+            self.hud_state_checkbox.setChecked(True)
+        finally:
+            self._loading = False
+        self._on_form_changed()
+
     def _on_state_changed(self, state: str) -> None:
+        self._controller_state = state
         self.state_value.setText(tr(self._language, f"state.{state}"))
         has_errors = bool(self.validation_label.text())
         can_start = not has_errors and state in {"idle", "paused"}
@@ -745,6 +866,7 @@ class MainWindow(QMainWindow):
         if self.tray_icon is not None:
             self.tray_toggle_action.setEnabled(can_pause or not has_errors)
             self.tray_pause_action.setEnabled(can_pause)
+        self._sync_observability_views()
 
     def _on_status_changed(self, message: str) -> None:
         self.statusBar().showMessage(message)
@@ -752,9 +874,42 @@ class MainWindow(QMainWindow):
     def _on_position_captured(self, x: int, y: int) -> None:
         self._current_target = (x, y)
         self.target_value.setText(tr(self._language, "target_value.captured", x=x, y=y))
+        self._sync_observability_views()
 
     def _on_action_count_changed(self, count: int) -> None:
+        self._action_count = count
         self.action_count_value.setText(str(count))
+        self._sync_observability_views()
+
+    def _on_actual_frequency_changed(self, frequency: float) -> None:
+        self._actual_frequency = max(frequency, 0.0)
+        self._render_actual_frequency()
+        self._sync_observability_views()
+
+    def _render_actual_frequency(self) -> None:
+        self.actual_frequency_value.setText(
+            tr(self._language, "value.actual_frequency", frequency=self._actual_frequency)
+        )
+
+    def _hud_lines(self) -> list[str]:
+        lines: list[str] = []
+        items = self._overlay_settings.hud_items
+        if "state" in items:
+            lines.append(f"{tr(self._language, 'field.current_state')}: {tr(self._language, f'state.{self._controller_state}')}")
+        if "rate" in items:
+            lines.append(f"{tr(self._language, 'field.actual_frequency')}: {tr(self._language, 'value.actual_frequency', frequency=self._actual_frequency)}")
+        if "count" in items:
+            lines.append(f"{tr(self._language, 'field.action_count')}: {self._action_count}")
+        return lines
+
+    def _sync_observability_views(self) -> None:
+        overlay = self._overlay_settings
+        self._hud_window.update_content(
+            lines=self._hud_lines(),
+            x=overlay.hud_x,
+            y=overlay.hud_y,
+            visible=overlay.hud_enabled,
+        )
 
     def _on_controller_error(self, message: str) -> None:
         QMessageBox.warning(self, self._display_name(), message)
@@ -868,6 +1023,7 @@ class MainWindow(QMainWindow):
             language=self._language,
             selected_preset=selected,
             last_settings=self._collect_settings(),
+            overlay=self._collect_overlay_settings(),
             presets=list(self._presets.values()),
         )
         try:
@@ -916,6 +1072,7 @@ class MainWindow(QMainWindow):
         self._controller.shutdown()
         self._global_hotkeys.stop()
         self._clear_local_shortcuts()
+        self._hud_window.hide()
         if self.tray_icon is not None:
             self.tray_icon.hide()
         event.accept()

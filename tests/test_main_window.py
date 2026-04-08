@@ -125,6 +125,51 @@ class MainWindowTests(unittest.TestCase):
                 window._force_quit = True
                 window.close()
 
+    def test_status_panel_shows_runtime_observability(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {"APPDATA": temp_dir}, clear=False):
+                window = MainWindow()
+
+            window._set_language("en")
+            window._on_state_changed("running")
+            window._on_actual_frequency_changed(18.5)
+            window._on_action_count_changed(42)
+
+            self.assertEqual(window.state_value.text(), "Running")
+            self.assertEqual(window.actual_frequency_label.text(), "Actual Rate")
+            self.assertEqual(window.actual_frequency_value.text(), "18.5 / s")
+            self.assertEqual(window.action_count_value.text(), "42")
+
+            window._force_quit = True
+            window.close()
+
+    def test_overlay_preferences_persist_and_keep_at_least_one_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir) / "ProAutoClicker"
+            with patch.dict(os.environ, {"APPDATA": temp_dir}, clear=False):
+                window = MainWindow()
+
+            window.enable_hud_checkbox.setChecked(True)
+            window.hud_state_checkbox.setChecked(False)
+            window.hud_rate_checkbox.setChecked(False)
+            window.hud_count_checkbox.setChecked(False)
+            APP.processEvents()
+
+            self.assertTrue(window.hud_state_checkbox.isChecked())
+
+            window.hud_rate_checkbox.setChecked(True)
+            window.hud_x_spin.setValue(320)
+            window.hud_y_spin.setValue(180)
+            APP.processEvents()
+
+            saved = json.loads((config_dir / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["overlay"]["hud_items"], ["state", "rate"])
+            self.assertEqual(saved["overlay"]["hud_x"], 320)
+            self.assertEqual(saved["overlay"]["hud_y"], 180)
+
+            window._force_quit = True
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()
