@@ -54,13 +54,16 @@ MODIFIER_VK_BY_NAME = {
     "Win": 0x5B,
 }
 
-MOUSE_FLAGS = {
-    "left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-    "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-    "middle": (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-    "mouse_left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-    "mouse_right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-    "mouse_middle": (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+MOUSE_DOWN_FLAGS = {
+    "left": MOUSEEVENTF_LEFTDOWN,
+    "right": MOUSEEVENTF_RIGHTDOWN,
+    "middle": MOUSEEVENTF_MIDDLEDOWN,
+}
+
+MOUSE_UP_FLAGS = {
+    "left": MOUSEEVENTF_LEFTUP,
+    "right": MOUSEEVENTF_RIGHTUP,
+    "middle": MOUSEEVENTF_MIDDLEUP,
 }
 
 
@@ -160,11 +163,6 @@ def _keyboard_input(vk: int, flags: int = 0) -> INPUT:
     return event
 
 
-def _build_mouse_click_inputs(action_mode: str) -> tuple[INPUT, INPUT]:
-    down_flag, up_flag = MOUSE_FLAGS[action_mode]
-    return _mouse_input(down_flag), _mouse_input(up_flag)
-
-
 def _get_virtual_screen_metrics() -> tuple[int, int, int, int]:
     left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
     top = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
@@ -208,6 +206,33 @@ def _build_key_combo_inputs(combo: KeyCombo, language: str | None = None) -> tup
     return tuple(inputs)
 
 
+def _build_key_down_inputs(combo: KeyCombo, language: str | None = None) -> tuple[INPUT, ...]:
+    locale_key = normalize_language(language)
+    normalized = combo.normalized()
+    vk = key_name_to_vk(normalized.key)
+    if vk is None:
+        raise OSError(tr(locale_key, "error.unsupported_keyboard_action"))
+
+    inputs: list[INPUT] = []
+    for modifier in normalized.modifiers:
+        inputs.append(_keyboard_input(MODIFIER_VK_BY_NAME[modifier]))
+    inputs.append(_keyboard_input(vk))
+    return tuple(inputs)
+
+
+def _build_key_up_inputs(combo: KeyCombo, language: str | None = None) -> tuple[INPUT, ...]:
+    locale_key = normalize_language(language)
+    normalized = combo.normalized()
+    vk = key_name_to_vk(normalized.key)
+    if vk is None:
+        raise OSError(tr(locale_key, "error.unsupported_keyboard_action"))
+
+    inputs: list[INPUT] = [_keyboard_input(vk, KEYEVENTF_KEYUP)]
+    for modifier in reversed(normalized.modifiers):
+        inputs.append(_keyboard_input(MODIFIER_VK_BY_NAME[modifier], KEYEVENTF_KEYUP))
+    return tuple(inputs)
+
+
 def _send_inputs(*inputs: INPUT) -> None:
     input_count = len(inputs)
     if input_count == 0:
@@ -229,8 +254,32 @@ def get_cursor_position() -> tuple[int, int] | None:
     return point.x, point.y
 
 
-def click_mouse(action_mode: str, x: int, y: int) -> None:
-    _send_inputs(_build_mouse_move_input(x, y), *_build_mouse_click_inputs(action_mode))
+def move_cursor(x: int, y: int) -> None:
+    _send_inputs(_build_mouse_move_input(x, y))
+
+
+def mouse_down(button: str, x: int, y: int) -> None:
+    _send_inputs(_build_mouse_move_input(x, y), _mouse_input(MOUSE_DOWN_FLAGS[button]))
+
+
+def mouse_up(button: str) -> None:
+    _send_inputs(_mouse_input(MOUSE_UP_FLAGS[button]))
+
+
+def click_mouse(button: str, x: int, y: int) -> None:
+    _send_inputs(
+        _build_mouse_move_input(x, y),
+        _mouse_input(MOUSE_DOWN_FLAGS[button]),
+        _mouse_input(MOUSE_UP_FLAGS[button]),
+    )
+
+
+def key_combo_down(combo: KeyCombo, language: str | None = None) -> None:
+    _send_inputs(*_build_key_down_inputs(combo, language))
+
+
+def key_combo_up(combo: KeyCombo, language: str | None = None) -> None:
+    _send_inputs(*_build_key_up_inputs(combo, language))
 
 
 def send_key_combo(combo: KeyCombo, language: str | None = None) -> None:
@@ -245,7 +294,13 @@ def hotkey_to_win32(combo: KeyCombo, language: str | None = None) -> tuple[int, 
         modifiers |= MODIFIER_FLAG_BY_NAME[modifier]
     vk = key_name_to_vk(normalized.key)
     if vk is None:
-        raise OSError(tr(locale_key, "error.unsupported_hotkey", hotkey=combo.display_text() or tr(locale_key, "summary.not_set")))
+        raise OSError(
+            tr(
+                locale_key,
+                "error.unsupported_hotkey",
+                hotkey=combo.display_text() or tr(locale_key, "summary.not_set"),
+            )
+        )
     return modifiers, vk
 
 
