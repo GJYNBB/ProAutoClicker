@@ -21,6 +21,16 @@
   <img alt="License" src="https://img.shields.io/badge/License-MIT-111111">
 </p>
 
+<p align="center">
+  <a href="https://github.com/GJYNBB/ProAutoClicker/releases/tag/v1.2.0">View v1.2.0 Release</a> |
+  <a href="https://github.com/GJYNBB/ProAutoClicker/releases/download/v1.2.0/ProAutoClicker-windows.zip">Download Windows Package</a>
+</p>
+
+## Download
+
+- Current stable release: [v1.2.0](https://github.com/GJYNBB/ProAutoClicker/releases/tag/v1.2.0)
+- Direct Windows download: [ProAutoClicker-windows.zip](https://github.com/GJYNBB/ProAutoClicker/releases/download/v1.2.0/ProAutoClicker-windows.zip)
+
 ## Overview
 
 Pro Auto Clicker is a lightweight Windows automation tool built with Python and PySide6. It is designed for fast, repeatable actions without overloading the interface: choose mouse or keyboard mode, tune the few settings that matter, and start.
@@ -93,7 +103,7 @@ After packaging, the executable is generated at `dist/ProAutoClicker/ProAutoClic
 The repository already includes `.github/workflows/build-release.yml`.
 
 - Push to `main` to build a Windows artifact automatically.
-- Push a tag like `v1.0.0` to build and publish a GitHub Release automatically.
+- Push a tag like `v1.2.0` to build and publish a GitHub Release automatically.
 - Trigger `workflow_dispatch` manually when you want a one-off build.
 
 For the maintainer checklist, see [RELEASING.md](./RELEASING.md).
@@ -121,8 +131,10 @@ autoclicker/
   win32_backend.py
   ui/
     action_unit_editor.py
+    components.py
     hotkey_edit.py
     main_window.py
+    status_hud.py
 assets/
 scripts/
 tests/

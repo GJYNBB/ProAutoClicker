@@ -21,6 +21,16 @@
   <img alt="License" src="https://img.shields.io/badge/License-MIT-111111">
 </p>
 
+<p align="center">
+  <a href="https://github.com/GJYNBB/ProAutoClicker/releases/tag/v1.2.0">查看 v1.2.0 Release</a> |
+  <a href="https://github.com/GJYNBB/ProAutoClicker/releases/download/v1.2.0/ProAutoClicker-windows.zip">下載 Windows 安裝包</a>
+</p>
+
+## 下載
+
+- 目前穩定版本：[v1.2.0](https://github.com/GJYNBB/ProAutoClicker/releases/tag/v1.2.0)
+- Windows 直接下載：[ProAutoClicker-windows.zip](https://github.com/GJYNBB/ProAutoClicker/releases/download/v1.2.0/ProAutoClicker-windows.zip)
+
 ## 專案簡介
 
 專業連點器 Pro 以 Python 和 PySide6 打造，面向 Windows 桌面使用情境，適合處理日常重複點擊、按鍵連發與輕量自動化操作。這個專案的重點不是堆疊大量功能，而是在常見流程中提供更直接、更穩定的操作體驗。
@@ -70,7 +80,7 @@ python auto_clicker.py
 儲存庫已內建 `.github/workflows/build-release.yml`。
 
 - 推送到 `main` 分支時會自動建置 Windows Artifact
-- 推送 `v1.0.0` 這類標籤時會自動建置並建立 GitHub Release
+- 推送 `v1.2.0` 這類標籤時會自動建置並建立 GitHub Release
 - 也支援手動觸發 `workflow_dispatch`
 
 維護者發布步驟可參考 [RELEASING.md](./RELEASING.md)。
@@ -90,13 +100,18 @@ autoclicker/
   controller.py
   i18n.py
   keymaps.py
+  input_backend.py
   models.py
   resources.py
   store.py
+  update_checker.py
   win32_backend.py
   ui/
+    action_unit_editor.py
+    components.py
     hotkey_edit.py
     main_window.py
+    status_hud.py
 assets/
 scripts/
 tests/
