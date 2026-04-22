@@ -22,8 +22,9 @@ class SettingsStoreTests(unittest.TestCase):
                 store = SettingsStore()
                 state = store.load()
 
-            self.assertEqual(state.last_settings.fixed_x, 0)
-            self.assertEqual(state.last_settings.frequency_hz, 20.0)
+            action = state.last_settings.first_action()
+            self.assertEqual(action.fixed_x, 0)
+            self.assertEqual(action.frequency_hz, 20.0)
 
     def test_import_presets_rejects_invalid_root_shape_in_english(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

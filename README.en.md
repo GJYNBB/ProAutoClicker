@@ -29,14 +29,37 @@ The app now includes full multilingual support for Simplified Chinese, Tradition
 
 ## Highlights
 
-- Mouse mode supports left, right, and middle button automation.
+- Mouse actions support left, right, middle, single click, double click, triple click, and long press.
 - Mouse targeting supports delayed position capture on start or fixed coordinates.
-- Keyboard mode supports single keys and modifier combinations.
-- The UI automatically hides unrelated controls based on the selected mode.
+- Keyboard actions support single keys and modifier combinations.
+- Advanced action sequences support add, edit, duplicate, batch delete, button-based reordering, and direct drag-and-drop reordering.
+- Each action unit can define its own random interval, random hold duration, coordinate jitter, execution count, run duration, and post-step delay.
 - Your last-used configuration and language are restored on the next launch.
 - Global hotkeys and app-only hotkeys are both supported.
 - Presets can be saved locally and imported or exported as JSON.
 - System tray support keeps the tool accessible while it runs in the background.
+- HUD content ordering, HUD opacity, emergency stop, start confirmation, safety countdown, update checks, and feedback links are supported.
+
+## Safety
+
+- The emergency stop hotkey is fixed to `Ctrl+Alt+End` and is kept globally registered when possible. Triggering it stops the controller and exits the app immediately.
+- “Confirm Before Start” is disabled by default. When enabled, the app asks for confirmation before starting automation, which is useful for fixed coordinates or high-frequency actions.
+- “Pre-action Safety Countdown” is disabled by default. Set it to a value greater than `0` to count down before each action; during the countdown you can cancel with the exit or emergency hotkey.
+- The HUD can optionally show the “Last Action” line so you can see the most recent execution time and cumulative count.
+
+## Updates And Feedback
+
+- `Help -> Check for Updates` calls the GitHub Releases API and compares the latest release tag with the local `APP_VERSION`.
+- “Check for updates on startup” is disabled by default. When enabled, the check runs asynchronously and does not block the UI.
+- `Help -> Submit Feedback / Report Issue` opens the repository Issues page.
+
+## Cross-platform Plan
+
+The stable input backend is still Windows-only because low-level input events currently depend on Win32 APIs such as `SendInput`, `RegisterHotKey`, and `GetCursorPos`. The project now includes an `InputBackend` abstraction and the controller accepts a backend via dependency injection:
+
+- Windows uses `Win32InputBackend` by default.
+- Non-Windows platforms use `UnsupportedInputBackend`, which fails with a clear unsupported-platform message instead of crashing on import.
+- A future backend can use `pynput` or `pyautogui` for macOS/Linux mouse, keyboard, and hotkey support.
 
 ## Requirements
 
@@ -90,11 +113,14 @@ autoclicker/
   controller.py
   i18n.py
   keymaps.py
+  input_backend.py
   models.py
   resources.py
   store.py
+  update_checker.py
   win32_backend.py
   ui/
+    action_unit_editor.py
     hotkey_edit.py
     main_window.py
 assets/

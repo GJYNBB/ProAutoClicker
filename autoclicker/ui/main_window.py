@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -36,9 +37,11 @@ from PySide6.QtWidgets import (
 
 from autoclicker import APP_VERSION
 from autoclicker.controller import AutomationController
+from autoclicker.input_backend import create_input_backend
 from autoclicker.i18n import app_display_name, build_help_html, default_preset_name, language_items, normalize_language, tr
 from autoclicker.models import (
     AppSettings,
+    EMERGENCY_STOP_HOTKEY,
     PersistedState,
     Preset,
     ValidationResult,
@@ -57,7 +60,7 @@ from autoclicker.theme import apply_theme
 from autoclicker.ui.action_unit_editor import ActionUnitDialog, ActionUnitEditor
 from autoclicker.ui.hotkey_edit import HotkeyLineEdit
 from autoclicker.ui.status_hud import StatusHudWindow
-from autoclicker.win32_backend import GlobalHotkeyManager
+from autoclicker.update_checker import UpdateChecker
 
 
 def _set_widget_error(widget: QWidget, message: str | None) -> None:
@@ -73,8 +76,10 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._store = SettingsStore()
-        self._controller = AutomationController()
-        self._global_hotkeys = GlobalHotkeyManager()
+        self._input_backend = create_input_backend()
+        self._controller = AutomationController(self._input_backend)
+        self._global_hotkeys = self._input_backend.create_hotkey_manager()
+        self._update_checker = UpdateChecker(self)
         self._persisted_state = self._store.load()
         self._language = normalize_language(self._persisted_state.language)
         self.theme = self._persisted_state.theme
@@ -88,6 +93,7 @@ class MainWindow(QMainWindow):
         self._actual_frequency = 0.0
         self._current_step_index = -1
         self._current_step_text = ""
+        self._last_action_text = ""
         self._controller_state = self._controller.state
         self._local_shortcuts: list[QShortcut] = []
         self._loading = False
@@ -106,6 +112,8 @@ class MainWindow(QMainWindow):
         self._load_initial_state()
         self._refresh_form_state()
         apply_theme(QApplication.instance(), self.theme)
+        if self._persisted_state.auto_check_updates:
+            QTimer.singleShot(1000, lambda: self._check_for_updates(manual=False))
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -158,7 +166,12 @@ class MainWindow(QMainWindow):
 
         self.quick_hint_label = QLabel(container)
         self.quick_hint_label.setWordWrap(True)
-        self.quick_editor = ActionUnitEditor(language=self._language, allow_infinite=True, parent=container)
+        self.quick_editor = ActionUnitEditor(
+            language=self._language,
+            allow_infinite=True,
+            backend=self._input_backend,
+            parent=container,
+        )
 
         self.task_group = QGroupBox(container)
         task_layout = QFormLayout(self.task_group)
@@ -186,6 +199,24 @@ class MainWindow(QMainWindow):
         hotkey_layout.addRow(self.exit_hotkey_label, self.exit_hotkey_edit)
         hotkey_layout.addRow(QLabel(""), self.hotkey_note_label)
 
+        self.safety_group = QGroupBox(container)
+        safety_layout = QFormLayout(self.safety_group)
+        self.confirm_before_start_checkbox = QCheckBox(self.safety_group)
+        self.safety_countdown_label = QLabel(self.safety_group)
+        self.safety_countdown_spin = QDoubleSpinBox(self.safety_group)
+        self.safety_countdown_spin.setDecimals(1)
+        self.safety_countdown_spin.setRange(0.0, 30.0)
+        self.safety_countdown_spin.setSingleStep(0.5)
+        self.emergency_hotkey_label = QLabel(self.safety_group)
+        self.emergency_hotkey_value = QLabel(EMERGENCY_STOP_HOTKEY.display_text(), self.safety_group)
+        self.safety_note_label = QLabel(self.safety_group)
+        self.safety_note_label.setWordWrap(True)
+        self.safety_note_label.setStyleSheet("color: #5f7285;")
+        safety_layout.addRow(self.confirm_before_start_checkbox)
+        safety_layout.addRow(self.safety_countdown_label, self.safety_countdown_spin)
+        safety_layout.addRow(self.emergency_hotkey_label, self.emergency_hotkey_value)
+        safety_layout.addRow(QLabel(""), self.safety_note_label)
+
         self.appearance_group = QGroupBox(container)
         appearance_layout = QVBoxLayout(self.appearance_group)
         appearance_form = QFormLayout()
@@ -194,6 +225,7 @@ class MainWindow(QMainWindow):
         appearance_form.addRow(self.theme_label, self.theme_combo)
 
         self.minimize_to_tray_checkbox = QCheckBox(self.appearance_group)
+        self.auto_check_updates_checkbox = QCheckBox(self.appearance_group)
         self.enable_hud_checkbox = QCheckBox(self.appearance_group)
         self.hud_items_label = QLabel(self.appearance_group)
         self.hud_position_label = QLabel(self.appearance_group)
@@ -235,6 +267,7 @@ class MainWindow(QMainWindow):
         hud_form.addRow(self.hud_opacity_label, self.hud_opacity_spin)
         appearance_layout.addLayout(appearance_form)
         appearance_layout.addWidget(self.minimize_to_tray_checkbox)
+        appearance_layout.addWidget(self.auto_check_updates_checkbox)
         appearance_layout.addWidget(self.enable_hud_checkbox)
         appearance_layout.addLayout(hud_form)
         appearance_layout.addWidget(self.hud_note_label)
@@ -259,7 +292,15 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(buttons_row)
         controls_layout.addWidget(self.validation_label)
 
-        for widget in (self.quick_hint_label, self.quick_editor, self.task_group, self.hotkey_group, self.appearance_group, self.controls_group):
+        for widget in (
+            self.quick_hint_label,
+            self.quick_editor,
+            self.task_group,
+            self.hotkey_group,
+            self.safety_group,
+            self.appearance_group,
+            self.controls_group,
+        ):
             layout.addWidget(widget)
         layout.addStretch(1)
         page_layout.addWidget(self._create_scroll_panel(container))
@@ -277,6 +318,11 @@ class MainWindow(QMainWindow):
         self.sequence_group = QGroupBox(page)
         group_layout = QVBoxLayout(self.sequence_group)
         self.sequence_list = QListWidget(self.sequence_group)
+        self.sequence_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.sequence_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.sequence_list.setDragEnabled(True)
+        self.sequence_list.setDropIndicatorShown(True)
+        self.sequence_list.setDefaultDropAction(Qt.MoveAction)
         buttons_row = QWidget(self.sequence_group)
         buttons_layout = QHBoxLayout(buttons_row)
         buttons_layout.setContentsMargins(0, 0, 0, 0)
@@ -324,6 +370,8 @@ class MainWindow(QMainWindow):
         self.actual_frequency_value = QLabel(self.status_group)
         self.action_count_label = QLabel(self.status_group)
         self.action_count_value = QLabel(self.status_group)
+        self.last_action_label = QLabel(self.status_group)
+        self.last_action_value = QLabel(self.status_group)
         self.target_position_label = QLabel(self.status_group)
         self.target_value = QLabel(self.status_group)
         self.summary_label = QLabel(self.status_group)
@@ -333,6 +381,7 @@ class MainWindow(QMainWindow):
         status_layout.addRow(self.current_step_label, self.current_step_value)
         status_layout.addRow(self.actual_frequency_label, self.actual_frequency_value)
         status_layout.addRow(self.action_count_label, self.action_count_value)
+        status_layout.addRow(self.last_action_label, self.last_action_value)
         status_layout.addRow(self.target_position_label, self.target_value)
         status_layout.addRow(self.summary_label, self.summary_value)
 
@@ -393,8 +442,14 @@ class MainWindow(QMainWindow):
 
         self.help_menu = menubar.addMenu("")
         self.help_action = QAction(self)
+        self.check_updates_action = QAction(self)
+        self.feedback_action = QAction(self)
         self.help_action.triggered.connect(self._show_help_dialog)
+        self.check_updates_action.triggered.connect(lambda: self._check_for_updates(manual=True))
+        self.feedback_action.triggered.connect(self._open_feedback_page)
         self.help_menu.addAction(self.help_action)
+        self.help_menu.addAction(self.check_updates_action)
+        self.help_menu.addAction(self.feedback_action)
 
     def _build_tray(self) -> None:
         self.tray_icon = None
@@ -426,7 +481,10 @@ class MainWindow(QMainWindow):
         self.toggle_hotkey_edit.hotkey_changed.connect(self._on_form_changed)
         self.exit_hotkey_edit.hotkey_changed.connect(self._on_form_changed)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_combo_changed)
+        self.confirm_before_start_checkbox.stateChanged.connect(self._on_form_changed)
+        self.safety_countdown_spin.valueChanged.connect(self._on_form_changed)
         self.minimize_to_tray_checkbox.stateChanged.connect(self._on_form_changed)
+        self.auto_check_updates_checkbox.stateChanged.connect(self._on_form_changed)
         self.enable_hud_checkbox.stateChanged.connect(self._on_form_changed)
         self.hud_x_spin.valueChanged.connect(self._on_form_changed)
         self.hud_y_spin.valueChanged.connect(self._on_form_changed)
@@ -446,6 +504,8 @@ class MainWindow(QMainWindow):
         self.move_down_button.clicked.connect(lambda: self._move_action(1))
         self.sequence_list.itemDoubleClicked.connect(lambda _item: self._edit_selected_action())
         self.sequence_list.currentRowChanged.connect(lambda _row: self._update_sequence_buttons())
+        self.sequence_list.itemSelectionChanged.connect(self._update_sequence_buttons)
+        self.sequence_list.model().rowsMoved.connect(lambda *_args: self._apply_sequence_order_from_list())
 
         self.load_preset_button.clicked.connect(self._load_selected_preset)
         self.save_preset_button.clicked.connect(self._save_current_preset)
@@ -461,9 +521,14 @@ class MainWindow(QMainWindow):
         self._controller.action_count_changed.connect(self._on_action_count_changed)
         self._controller.actual_frequency_changed.connect(self._on_actual_frequency_changed)
         self._controller.current_step_changed.connect(self._on_current_step_changed)
+        self._controller.last_action_changed.connect(self._on_last_action_changed)
         self._global_hotkeys.toggle_pressed.connect(self._handle_hotkey_toggle)
         self._global_hotkeys.exit_pressed.connect(self._handle_exit)
+        self._global_hotkeys.emergency_pressed.connect(self._handle_emergency_stop)
         self._global_hotkeys.error_occurred.connect(self._on_controller_error)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.up_to_date.connect(self._on_update_up_to_date)
+        self._update_checker.check_failed.connect(self._on_update_check_failed)
         self._hud_window.position_changed.connect(self._on_hud_position_changed)
 
         if self.tray_icon is not None:
@@ -496,7 +561,7 @@ class MainWindow(QMainWindow):
         return data if isinstance(data, str) and data else default
 
     def _default_hud_item_order(self) -> tuple[str, ...]:
-        return ("state", "step", "rate", "count")
+        return ("state", "step", "rate", "count", "last")
 
     def _selected_hud_items(self) -> tuple[str, ...]:
         items: list[str] = []
@@ -545,6 +610,7 @@ class MainWindow(QMainWindow):
         self.sequence_group.setTitle(tr(self._language, "group.sequence"))
         self.task_group.setTitle(tr(self._language, "group.task"))
         self.hotkey_group.setTitle(tr(self._language, "group.hotkey"))
+        self.safety_group.setTitle(tr(self._language, "group.safety"))
         self.appearance_group.setTitle(tr(self._language, "group.appearance"))
         self.controls_group.setTitle(tr(self._language, "group.controls"))
         self.status_group.setTitle(tr(self._language, "group.status"))
@@ -562,12 +628,25 @@ class MainWindow(QMainWindow):
         self.toggle_hotkey_edit.setPlaceholderText(tr(self._language, "hint.hotkey_input"))
         self.exit_hotkey_edit.setPlaceholderText(tr(self._language, "hint.hotkey_input"))
 
+        self.confirm_before_start_checkbox.setText(tr(self._language, "field.confirm_before_start"))
+        self.safety_countdown_label.setText(tr(self._language, "field.safety_countdown"))
+        self.safety_countdown_spin.setSuffix(tr(self._language, "suffix.seconds"))
+        self.emergency_hotkey_label.setText(tr(self._language, "field.emergency_hotkey"))
+        self.emergency_hotkey_value.setText(EMERGENCY_STOP_HOTKEY.display_text())
+        self.safety_note_label.setText(
+            f"{tr(self._language, 'hint.safety_countdown')} {tr(self._language, 'hint.emergency_hotkey')}"
+        )
+        self.confirm_before_start_checkbox.setToolTip(tr(self._language, "hint.confirm_before_start"))
+        self.safety_countdown_spin.setToolTip(tr(self._language, "hint.safety_countdown"))
+
         self.theme_label.setText(tr(self._language, "field.theme"))
         self.minimize_to_tray_checkbox.setText(
             "关闭窗口时最小化到系统托盘，而不是直接退出"
             if self._language == "zh-CN"
             else "Minimize to the system tray when closing the window instead of exiting immediately"
         )
+        self.auto_check_updates_checkbox.setText(tr(self._language, "field.auto_check_updates"))
+        self.auto_check_updates_checkbox.setToolTip(tr(self._language, "hint.auto_check_updates"))
         self.enable_hud_checkbox.setText("启用 HUD 悬浮窗" if self._language == "zh-CN" else "Enable HUD overlay")
         self.hud_items_label.setText(tr(self._language, "field.hud_items"))
         self.hud_position_label.setText(tr(self._language, "field.hud_position"))
@@ -590,6 +669,8 @@ class MainWindow(QMainWindow):
         self.current_step_label.setText(tr(self._language, "field.current_step"))
         self.actual_frequency_label.setText(tr(self._language, "field.actual_frequency"))
         self.action_count_label.setText(tr(self._language, "field.action_count"))
+        self.last_action_label.setText(tr(self._language, "field.last_action"))
+        self.last_action_value.setText(self._last_action_text or tr(self._language, "value.no_last_action"))
         self.target_position_label.setText(tr(self._language, "field.target_position"))
         self.summary_label.setText(tr(self._language, "field.current_summary"))
 
@@ -609,6 +690,8 @@ class MainWindow(QMainWindow):
         self.language_menu.setTitle(tr(self._language, "menu.language"))
         self.help_menu.setTitle(tr(self._language, "menu.help"))
         self.help_action.setText(tr(self._language, "menu.help.usage"))
+        self.check_updates_action.setText(tr(self._language, "menu.help.check_updates"))
+        self.feedback_action.setText(tr(self._language, "menu.help.feedback"))
         for code, action in self.language_actions.items():
             action.setChecked(code == self._language)
         if self.tray_icon is not None:
@@ -628,6 +711,11 @@ class MainWindow(QMainWindow):
         self._rebuild_preset_combo(self._persisted_state.selected_preset or self._default_preset_name())
         self._apply_settings_to_form(self._settings)
         self._apply_overlay_to_form()
+        self._loading = True
+        try:
+            self.auto_check_updates_checkbox.setChecked(self._persisted_state.auto_check_updates)
+        finally:
+            self._loading = False
         self.statusBar().showMessage(tr(self._language, "status.ready"))
 
     def _apply_settings_to_form(self, settings: AppSettings) -> None:
@@ -640,6 +728,8 @@ class MainWindow(QMainWindow):
             self.toggle_hotkey_edit.set_hotkey(self._settings.toggle_hotkey)
             self.exit_hotkey_edit.set_hotkey(self._settings.exit_hotkey)
             self.minimize_to_tray_checkbox.setChecked(self._settings.minimize_to_tray)
+            self.confirm_before_start_checkbox.setChecked(self._settings.confirm_before_start)
+            self.safety_countdown_spin.setValue(self._settings.safety_countdown_seconds)
         finally:
             self._loading = False
         self._refresh_sequence_list()
@@ -662,6 +752,8 @@ class MainWindow(QMainWindow):
         settings.toggle_hotkey = self.toggle_hotkey_edit.hotkey()
         settings.exit_hotkey = self.exit_hotkey_edit.hotkey()
         settings.minimize_to_tray = self.minimize_to_tray_checkbox.isChecked()
+        settings.confirm_before_start = self.confirm_before_start_checkbox.isChecked()
+        settings.safety_countdown_seconds = self.safety_countdown_spin.value()
         settings.actions[0] = self.quick_editor.action_unit()
         return settings.normalized()
 
@@ -687,6 +779,7 @@ class MainWindow(QMainWindow):
         _set_widget_error(self.hotkey_scope_combo, self._validation.first_message_for("hotkey_scope"))
         _set_widget_error(self.toggle_hotkey_edit, self._validation.first_message_for("toggle_hotkey"))
         _set_widget_error(self.exit_hotkey_edit, self._validation.first_message_for("exit_hotkey"))
+        _set_widget_error(self.safety_countdown_spin, self._validation.first_message_for("safety_countdown_seconds"))
         self.validation_label.setText("\n".join(self._validation.messages()))
         self._refresh_sequence_list()
         self._update_summary()
@@ -696,15 +789,20 @@ class MainWindow(QMainWindow):
         self._sync_hud()
 
     def _refresh_sequence_list(self) -> None:
+        selected_indices = set(self._selected_action_indices())
         selected = self.sequence_list.currentRow()
         self.sequence_list.blockSignals(True)
         self.sequence_list.clear()
         for index, action in enumerate(self._settings.actions):
-            item = QListWidgetItem(f"{index + 1}. {summarize_action_unit(action, self._language)}")
+            label = action.name or format_action_unit_label(action, self._language)
+            item = QListWidgetItem(f"{index + 1}. {label}\n   {summarize_action_unit(action, self._language)}")
             item.setData(Qt.UserRole, index)
             item.setToolTip(action.name or format_action_unit_label(action, self._language))
+            item.setSizeHint(QSize(0, 58))
             self.sequence_list.addItem(item)
-        if self.sequence_list.count() > 0:
+            if index in selected_indices:
+                item.setSelected(True)
+        if self.sequence_list.count() > 0 and not selected_indices:
             self.sequence_list.setCurrentRow(min(max(selected, 0), self.sequence_list.count() - 1))
         self.sequence_list.blockSignals(False)
         self._update_sequence_buttons()
@@ -744,10 +842,17 @@ class MainWindow(QMainWindow):
         self._clear_local_shortcuts()
         self._global_hotkeys.stop()
         if not self._validation.is_valid:
+            self._global_hotkeys.configure(None, None, self._language, emergency_hotkey=EMERGENCY_STOP_HOTKEY)
             return
         if self._settings.hotkey_scope == "global":
-            self._global_hotkeys.configure(self._settings.toggle_hotkey, self._settings.exit_hotkey, self._language)
+            self._global_hotkeys.configure(
+                self._settings.toggle_hotkey,
+                self._settings.exit_hotkey,
+                self._language,
+                emergency_hotkey=EMERGENCY_STOP_HOTKEY,
+            )
             return
+        self._global_hotkeys.configure(None, None, self._language, emergency_hotkey=EMERGENCY_STOP_HOTKEY)
         toggle_shortcut = QShortcut(QKeySequence(self._settings.toggle_hotkey.display_text()), self)
         toggle_shortcut.activated.connect(self._handle_hotkey_toggle)
         exit_shortcut = QShortcut(QKeySequence(self._settings.exit_hotkey.display_text()), self)
@@ -767,19 +872,48 @@ class MainWindow(QMainWindow):
         data = item.data(Qt.UserRole)
         return int(data) if isinstance(data, int) else -1
 
+    def _selected_action_indices(self) -> list[int]:
+        indices: list[int] = []
+        for item in self.sequence_list.selectedItems():
+            data = item.data(Qt.UserRole)
+            if isinstance(data, int):
+                indices.append(data)
+        return sorted(set(indices))
+
+    def _sequence_order_from_list(self) -> list[int]:
+        order: list[int] = []
+        for row in range(self.sequence_list.count()):
+            data = self.sequence_list.item(row).data(Qt.UserRole)
+            if isinstance(data, int):
+                order.append(data)
+        return order
+
+    def _apply_sequence_order_from_list(self) -> None:
+        if self._loading:
+            return
+        order = self._sequence_order_from_list()
+        if sorted(order) != list(range(len(self._settings.actions))):
+            return
+        self._settings = self._current_settings()
+        self._settings.actions = [self._settings.actions[index] for index in order]
+        self.quick_editor.set_action(self._settings.first_action())
+        self._refresh_form_state()
+        self._on_status_changed(tr(self._language, "status.sequence_updated"))
+
     def _default_new_action(self, index: int):
         action = default_action_unit(index)
         action.name = ("主动作" if index == 0 else f"步骤 {index + 1}") if self._language == "zh-CN" else ("Primary Action" if index == 0 else f"Step {index + 1}")
         return action
 
     def _update_sequence_buttons(self) -> None:
-        index = self._selected_action_index()
+        indices = self._selected_action_indices()
+        index = indices[0] if len(indices) == 1 else -1
         count = len(self._settings.actions)
         editable = self._controller_state in {"idle", "paused"}
         self.add_action_button.setEnabled(editable)
-        self.edit_action_button.setEnabled(editable and index >= 0)
-        self.copy_action_button.setEnabled(editable and index >= 0)
-        self.delete_action_button.setEnabled(editable and index >= 0)
+        self.edit_action_button.setEnabled(editable and len(indices) == 1)
+        self.copy_action_button.setEnabled(editable and bool(indices))
+        self.delete_action_button.setEnabled(editable and bool(indices))
         self.move_up_button.setEnabled(editable and index > 0)
         self.move_down_button.setEnabled(editable and index >= 0 and index < count - 1)
 
@@ -806,6 +940,8 @@ class MainWindow(QMainWindow):
                 lines.append(f"{tr(self._language, 'field.actual_frequency')}: {tr(self._language, 'value.actual_frequency', frequency=self._actual_frequency)}")
             elif key == "count":
                 lines.append(f"{tr(self._language, 'field.action_count')}: {self._action_count}")
+            elif key == "last":
+                lines.append(f"{tr(self._language, 'field.last_action')}: {self._last_action_text or tr(self._language, 'value.no_last_action')}")
         return lines
 
     def _sync_hud(self) -> None:
@@ -823,13 +959,38 @@ class MainWindow(QMainWindow):
             self._current_target = None
             self.target_value.setText(tr(self._language, "target_value.waiting_capture"))
 
-    def _handle_start_resume(self) -> None:
+    def _confirm_start_if_needed(self) -> bool:
+        if not self._settings.confirm_before_start:
+            return True
+        return (
+            QMessageBox.question(
+                self,
+                tr(self._language, "dialog.start_confirm_title"),
+                tr(
+                    self._language,
+                    "dialog.start_confirm_message",
+                    emergency=EMERGENCY_STOP_HOTKEY.display_text(),
+                ),
+            )
+            == QMessageBox.Yes
+        )
+
+    def _start_current_settings(self, *, show_error_dialog: bool) -> None:
         self._refresh_form_state()
         if not self._validation.is_valid:
-            QMessageBox.warning(self, self._display_name(), "\n".join(self._validation.messages()))
+            if show_error_dialog:
+                QMessageBox.warning(self, self._display_name(), "\n".join(self._validation.messages()))
+            else:
+                self._on_status_changed(tr(self._language, "status.fix_errors_before_hotkey"))
+            return
+        if not self._confirm_start_if_needed():
+            self._on_status_changed(tr(self._language, "status.start_cancelled"))
             return
         self._prepare_for_start()
         self._controller.start(self._settings, self._language)
+
+    def _handle_start_resume(self) -> None:
+        self._start_current_settings(show_error_dialog=True)
 
     def _handle_pause(self) -> None:
         self._controller.pause()
@@ -838,12 +999,7 @@ class MainWindow(QMainWindow):
         if self._controller.state in {"running", "countdown"}:
             self._controller.pause()
             return
-        self._refresh_form_state()
-        if not self._validation.is_valid:
-            self._on_status_changed(tr(self._language, "status.fix_errors_before_hotkey"))
-            return
-        self._prepare_for_start()
-        self._controller.start(self._settings, self._language)
+        self._start_current_settings(show_error_dialog=False)
 
     def _handle_exit(self) -> None:
         self._force_quit = True
@@ -858,6 +1014,10 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    def _handle_emergency_stop(self) -> None:
+        self.statusBar().showMessage(tr(self._language, "status.emergency_stop", hotkey=EMERGENCY_STOP_HOTKEY.display_text()))
+        self._handle_exit()
 
     def _set_language(self, language: str) -> None:
         if self._loading:
@@ -912,8 +1072,11 @@ class MainWindow(QMainWindow):
         self.hotkey_scope_combo.setEnabled(editable)
         self.toggle_hotkey_edit.setEnabled(editable)
         self.exit_hotkey_edit.setEnabled(editable)
+        self.confirm_before_start_checkbox.setEnabled(editable)
+        self.safety_countdown_spin.setEnabled(editable)
         self.theme_combo.setEnabled(editable)
         self.minimize_to_tray_checkbox.setEnabled(editable)
+        self.auto_check_updates_checkbox.setEnabled(editable)
         self.enable_hud_checkbox.setEnabled(editable)
         self.hud_x_spin.setEnabled(editable and self.enable_hud_checkbox.isChecked())
         self.hud_y_spin.setEnabled(editable and self.enable_hud_checkbox.isChecked())
@@ -936,6 +1099,11 @@ class MainWindow(QMainWindow):
     def _on_action_count_changed(self, count: int) -> None:
         self._action_count = count
         self.action_count_value.setText(str(count))
+        self._sync_hud()
+
+    def _on_last_action_changed(self, text: str) -> None:
+        self._last_action_text = text
+        self.last_action_value.setText(text or tr(self._language, "value.no_last_action"))
         self._sync_hud()
 
     def _on_actual_frequency_changed(self, frequency: float) -> None:
@@ -969,7 +1137,14 @@ class MainWindow(QMainWindow):
 
     def _add_action(self) -> None:
         self._settings = self._current_settings()
-        dialog = ActionUnitDialog(language=self._language, title=tr(self._language, "dialog.add_action"), action=self._default_new_action(len(self._settings.actions)), allow_infinite=False, parent=self)
+        dialog = ActionUnitDialog(
+            language=self._language,
+            title=tr(self._language, "dialog.add_action"),
+            action=self._default_new_action(len(self._settings.actions)),
+            allow_infinite=False,
+            backend=self._input_backend,
+            parent=self,
+        )
         if not dialog.exec():
             return
         self._settings.actions.append(dialog.action_unit())
@@ -983,7 +1158,14 @@ class MainWindow(QMainWindow):
         if index < 0:
             QMessageBox.information(self, self._display_name(), tr(self._language, "dialog.sequence_empty"))
             return
-        dialog = ActionUnitDialog(language=self._language, title=tr(self._language, "dialog.edit_action"), action=self._settings.actions[index], allow_infinite=index == 0 and len(self._settings.actions) == 1, parent=self)
+        dialog = ActionUnitDialog(
+            language=self._language,
+            title=tr(self._language, "dialog.edit_action"),
+            action=self._settings.actions[index],
+            allow_infinite=index == 0 and len(self._settings.actions) == 1,
+            backend=self._input_backend,
+            parent=self,
+        )
         if not dialog.exec():
             return
         self._settings.actions[index] = dialog.action_unit()
@@ -993,30 +1175,50 @@ class MainWindow(QMainWindow):
 
     def _copy_selected_action(self) -> None:
         self._settings = self._current_settings()
-        index = self._selected_action_index()
-        if index < 0:
+        indices = self._selected_action_indices()
+        if not indices:
             return
-        clone = type(self._settings.actions[index]).from_dict(self._settings.actions[index].to_dict(), index=len(self._settings.actions))
-        if clone.limit_mode == "infinite":
-            clone.limit_mode = "count"
-        if clone.name:
-            clone.name = (clone.name + " - 副本") if self._language == "zh-CN" else (clone.name + " - Copy")
-        else:
-            clone.name = "复制动作" if self._language == "zh-CN" else "Copied Action"
-        self._settings.actions.insert(index + 1, clone)
+        clones = []
+        for index in indices:
+            clone = type(self._settings.actions[index]).from_dict(
+                self._settings.actions[index].to_dict(),
+                index=len(self._settings.actions) + len(clones),
+            )
+            if clone.limit_mode == "infinite":
+                clone.limit_mode = "count"
+            if clone.name:
+                clone.name = clone.name + tr(self._language, "label.copy_suffix")
+            else:
+                clone.name = tr(self._language, "label.copied_action")
+            clones.append(clone)
+        insert_at = indices[-1] + 1
+        self._settings.actions[insert_at:insert_at] = clones
         self._apply_settings_to_form(self._settings)
         self._refresh_form_state()
-        self.sequence_list.setCurrentRow(index + 1)
+        self.sequence_list.clearSelection()
+        for row in range(insert_at, insert_at + len(clones)):
+            item = self.sequence_list.item(row)
+            if item is not None:
+                item.setSelected(True)
+        self.sequence_list.setCurrentRow(insert_at)
 
     def _delete_selected_action(self) -> None:
         self._settings = self._current_settings()
-        index = self._selected_action_index()
-        if index < 0:
+        indices = self._selected_action_indices()
+        if not indices:
             return
-        name = self._settings.actions[index].name or format_action_unit_label(self._settings.actions[index], self._language)
-        if QMessageBox.question(self, self._display_name(), tr(self._language, "dialog.delete_action", name=name)) != QMessageBox.Yes:
+        if len(indices) == 1:
+            name = self._settings.actions[indices[0]].name or format_action_unit_label(
+                self._settings.actions[indices[0]],
+                self._language,
+            )
+            message = tr(self._language, "dialog.delete_action", name=name)
+        else:
+            message = tr(self._language, "dialog.delete_actions", count=len(indices))
+        if QMessageBox.question(self, self._display_name(), message) != QMessageBox.Yes:
             return
-        self._settings.actions.pop(index)
+        for index in reversed(indices):
+            self._settings.actions.pop(index)
         if not self._settings.actions:
             self._settings.actions = [default_action_unit(0)]
         self._apply_settings_to_form(self._settings)
@@ -1099,6 +1301,34 @@ class MainWindow(QMainWindow):
             return
         self._on_status_changed(tr(self._language, "status.exported_presets", path=path))
 
+    def _check_for_updates(self, *, manual: bool) -> None:
+        if manual:
+            self._on_status_changed(tr(self._language, "status.update_checking"))
+        self._update_checker.check_async(APP_VERSION)
+
+    def _on_update_available(self, version: str, url: str, name: str) -> None:
+        self._on_status_changed(tr(self._language, "status.update_available", version=version))
+        if not url:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                tr(self._language, "dialog.update_available_title"),
+                tr(self._language, "dialog.update_available_message", version=version, url=url),
+            )
+            == QMessageBox.Yes
+        ):
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _on_update_up_to_date(self, version: str) -> None:
+        self._on_status_changed(tr(self._language, "status.update_not_available", version=version))
+
+    def _on_update_check_failed(self, error: str) -> None:
+        self._on_status_changed(tr(self._language, "status.update_check_failed", error=error))
+
+    def _open_feedback_page(self) -> None:
+        QDesktopServices.openUrl(QUrl("https://github.com/GJYNBB/ProAutoClicker/issues"))
+
     def _save_persisted_state(self) -> None:
         if self._loading:
             return
@@ -1106,6 +1336,7 @@ class MainWindow(QMainWindow):
             language=self._language,
             theme=self.theme,
             selected_preset=self.preset_combo.currentText() or self._default_preset_name(),
+            auto_check_updates=self.auto_check_updates_checkbox.isChecked(),
             last_settings=self._current_settings(),
             overlay=self._collect_overlay(),
             presets=list(self._presets.values()),

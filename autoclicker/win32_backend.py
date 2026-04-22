@@ -28,6 +28,7 @@ MOD_NOREPEAT = 0x4000
 
 HOTKEY_ID_TOGGLE = 1
 HOTKEY_ID_EXIT = 2
+HOTKEY_ID_EMERGENCY = 3
 
 KEYEVENTF_KEYUP = 0x0002
 MOUSEEVENTF_MOVE = 0x0001
@@ -189,6 +190,10 @@ def _build_mouse_move_input(x: int, y: int) -> INPUT:
     return event
 
 
+def _build_mouse_click_inputs(button: str) -> tuple[INPUT, INPUT]:
+    return _mouse_input(MOUSE_DOWN_FLAGS[button]), _mouse_input(MOUSE_UP_FLAGS[button])
+
+
 def _build_key_combo_inputs(combo: KeyCombo, language: str | None = None) -> tuple[INPUT, ...]:
     locale_key = normalize_language(language)
     normalized = combo.normalized()
@@ -307,6 +312,7 @@ def hotkey_to_win32(combo: KeyCombo, language: str | None = None) -> tuple[int, 
 class GlobalHotkeyManager(QObject):
     toggle_pressed = Signal()
     exit_pressed = Signal()
+    emergency_pressed = Signal()
     error_occurred = Signal(str)
 
     def __init__(self) -> None:
@@ -315,12 +321,24 @@ class GlobalHotkeyManager(QObject):
         self._thread_id: int | None = None
         self._lock = threading.Lock()
 
-    def configure(self, toggle_hotkey: KeyCombo, exit_hotkey: KeyCombo, language: str | None = None) -> None:
+    def configure(
+        self,
+        toggle_hotkey: KeyCombo | None,
+        exit_hotkey: KeyCombo | None,
+        language: str | None = None,
+        *,
+        emergency_hotkey: KeyCombo | None = None,
+    ) -> None:
         locale_key = normalize_language(language)
         self.stop()
         self._thread = threading.Thread(
             target=self._message_loop,
-            args=(toggle_hotkey.normalized(), exit_hotkey.normalized(), locale_key),
+            args=(
+                toggle_hotkey.normalized() if toggle_hotkey is not None else None,
+                exit_hotkey.normalized() if exit_hotkey is not None else None,
+                emergency_hotkey.normalized() if emergency_hotkey is not None else None,
+                locale_key,
+            ),
             daemon=True,
         )
         self._thread.start()
@@ -337,21 +355,35 @@ class GlobalHotkeyManager(QObject):
             self._thread = None
             self._thread_id = None
 
-    def _message_loop(self, toggle_hotkey: KeyCombo, exit_hotkey: KeyCombo, language: str) -> None:
+    def _message_loop(
+        self,
+        toggle_hotkey: KeyCombo | None,
+        exit_hotkey: KeyCombo | None,
+        emergency_hotkey: KeyCombo | None,
+        language: str,
+    ) -> None:
         thread_id = kernel32.GetCurrentThreadId()
-        registered_toggle = False
-        registered_exit = False
+        registered_hotkeys: list[int] = []
         with self._lock:
             self._thread_id = thread_id
         try:
-            toggle_modifiers, toggle_vk = hotkey_to_win32(toggle_hotkey, language)
-            exit_modifiers, exit_vk = hotkey_to_win32(exit_hotkey, language)
-            if not user32.RegisterHotKey(None, HOTKEY_ID_TOGGLE, toggle_modifiers, toggle_vk):
-                raise OSError(tr(language, "error.register_toggle_failed", hotkey=toggle_hotkey.display_text()))
-            registered_toggle = True
-            if not user32.RegisterHotKey(None, HOTKEY_ID_EXIT, exit_modifiers, exit_vk):
-                raise OSError(tr(language, "error.register_exit_failed", hotkey=exit_hotkey.display_text()))
-            registered_exit = True
+            if toggle_hotkey is not None:
+                toggle_modifiers, toggle_vk = hotkey_to_win32(toggle_hotkey, language)
+                if not user32.RegisterHotKey(None, HOTKEY_ID_TOGGLE, toggle_modifiers, toggle_vk):
+                    raise OSError(tr(language, "error.register_toggle_failed", hotkey=toggle_hotkey.display_text()))
+                registered_hotkeys.append(HOTKEY_ID_TOGGLE)
+            if exit_hotkey is not None:
+                exit_modifiers, exit_vk = hotkey_to_win32(exit_hotkey, language)
+                if not user32.RegisterHotKey(None, HOTKEY_ID_EXIT, exit_modifiers, exit_vk):
+                    raise OSError(tr(language, "error.register_exit_failed", hotkey=exit_hotkey.display_text()))
+                registered_hotkeys.append(HOTKEY_ID_EXIT)
+            if emergency_hotkey is not None:
+                emergency_modifiers, emergency_vk = hotkey_to_win32(emergency_hotkey, language)
+                if not user32.RegisterHotKey(None, HOTKEY_ID_EMERGENCY, emergency_modifiers, emergency_vk):
+                    raise OSError(
+                        tr(language, "error.register_emergency_failed", hotkey=emergency_hotkey.display_text())
+                    )
+                registered_hotkeys.append(HOTKEY_ID_EMERGENCY)
 
             msg = MSG()
             while True:
@@ -365,12 +397,12 @@ class GlobalHotkeyManager(QObject):
                         self.toggle_pressed.emit()
                     elif msg.wParam == HOTKEY_ID_EXIT:
                         self.exit_pressed.emit()
+                    elif msg.wParam == HOTKEY_ID_EMERGENCY:
+                        self.emergency_pressed.emit()
         except OSError as exc:
             self.error_occurred.emit(str(exc))
         finally:
-            if registered_toggle:
-                user32.UnregisterHotKey(None, HOTKEY_ID_TOGGLE)
-            if registered_exit:
-                user32.UnregisterHotKey(None, HOTKEY_ID_EXIT)
+            for hotkey_id in registered_hotkeys:
+                user32.UnregisterHotKey(None, hotkey_id)
             with self._lock:
                 self._thread_id = None

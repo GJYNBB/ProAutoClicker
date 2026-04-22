@@ -32,7 +32,7 @@ class SettingsStore:
 
     def export_presets(self, path: str, presets: list[Preset]) -> None:
         data = {
-            "schema_version": 5,
+            "schema_version": 6,
             "presets": [preset.to_dict() for preset in presets],
         }
         Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

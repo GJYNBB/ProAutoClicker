@@ -13,7 +13,7 @@ MOUSE_BUTTON_CHOICES = ("left", "right", "middle")
 MOUSE_INTERACTION_CHOICES = ("single", "double", "triple", "hold")
 TARGET_CHOICES = ("capture", "fixed")
 HOTKEY_SCOPE_CHOICES = ("global", "application")
-HUD_ITEM_CHOICES = ("state", "step", "rate", "count")
+HUD_ITEM_CHOICES = ("state", "step", "rate", "count", "last")
 THEME_CHOICES = ("light", "dark")
 SEQUENCE_MODE_CHOICES = ("once", "loop")
 LIMIT_MODE_CHOICES = ("infinite", "count", "duration")
@@ -166,6 +166,9 @@ class KeyCombo:
             key=str(data.get("key", "")),
             modifiers=tuple(str(item) for item in modifiers),
         ).normalized()
+
+
+EMERGENCY_STOP_HOTKEY = KeyCombo("End", ("Ctrl", "Alt"))
 
 
 @dataclass
@@ -337,6 +340,8 @@ class AppSettings:
     toggle_hotkey: KeyCombo = field(default_factory=lambda: KeyCombo("F2"))
     exit_hotkey: KeyCombo = field(default_factory=lambda: KeyCombo("Esc"))
     minimize_to_tray: bool = True
+    confirm_before_start: bool = False
+    safety_countdown_seconds: float = 0.0
     actions: list[ActionUnit] = field(default_factory=lambda: [default_action_unit(0)])
 
     def normalized(self) -> "AppSettings":
@@ -349,6 +354,8 @@ class AppSettings:
             toggle_hotkey=self.toggle_hotkey.normalized(),
             exit_hotkey=self.exit_hotkey.normalized(),
             minimize_to_tray=bool(self.minimize_to_tray),
+            confirm_before_start=bool(self.confirm_before_start),
+            safety_countdown_seconds=max(float(self.safety_countdown_seconds), 0.0),
             actions=actions,
         )
 
@@ -360,6 +367,8 @@ class AppSettings:
             "toggle_hotkey": normalized.toggle_hotkey.to_dict(),
             "exit_hotkey": normalized.exit_hotkey.to_dict(),
             "minimize_to_tray": normalized.minimize_to_tray,
+            "confirm_before_start": normalized.confirm_before_start,
+            "safety_countdown_seconds": normalized.safety_countdown_seconds,
             "actions": [action.to_dict() for action in normalized.actions],
         }
 
@@ -378,9 +387,11 @@ class AppSettings:
         return AppSettings(
             sequence_mode=_coerce_choice(data.get("sequence_mode"), SEQUENCE_MODE_CHOICES, "once"),
             hotkey_scope=_coerce_choice(data.get("hotkey_scope"), HOTKEY_SCOPE_CHOICES, "global"),
-            toggle_hotkey=KeyCombo.from_dict(data.get("toggle_hotkey")),
-            exit_hotkey=KeyCombo.from_dict(data.get("exit_hotkey")),
+            toggle_hotkey=KeyCombo.from_dict(data.get("toggle_hotkey")) if "toggle_hotkey" in data else KeyCombo("F2"),
+            exit_hotkey=KeyCombo.from_dict(data.get("exit_hotkey")) if "exit_hotkey" in data else KeyCombo("Esc"),
             minimize_to_tray=_coerce_bool(data.get("minimize_to_tray", True), True),
+            confirm_before_start=_coerce_bool(data.get("confirm_before_start", False), False),
+            safety_countdown_seconds=max(_coerce_float(data.get("safety_countdown_seconds", 0.0), 0.0), 0.0),
             actions=actions,
         ).normalized()
 
@@ -447,10 +458,11 @@ class OverlaySettings:
 
 @dataclass
 class PersistedState:
-    schema_version: int = 5
+    schema_version: int = 6
     language: str = field(default_factory=detect_system_language)
     theme: str = "light"
     selected_preset: str = field(default_factory=default_preset_name)
+    auto_check_updates: bool = False
     last_settings: AppSettings = field(default_factory=AppSettings)
     overlay: OverlaySettings = field(default_factory=OverlaySettings)
     presets: list[Preset] = field(default_factory=lambda: [Preset(name=default_preset_name(), settings=AppSettings())])
@@ -461,6 +473,7 @@ class PersistedState:
             "language": self.language,
             "theme": self.theme,
             "selected_preset": self.selected_preset,
+            "auto_check_updates": self.auto_check_updates,
             "last_settings": self.last_settings.to_dict(),
             "overlay": self.overlay.to_dict(),
             "presets": [preset.to_dict() for preset in self.presets],
@@ -480,10 +493,11 @@ class PersistedState:
         if not presets:
             presets = [Preset(name=fallback_name, settings=AppSettings())]
         return PersistedState(
-            schema_version=_coerce_int(data.get("schema_version", 5), 5),
+            schema_version=_coerce_int(data.get("schema_version", 6), 6),
             language=language,
             theme=_coerce_choice(data.get("theme"), THEME_CHOICES, "light"),
             selected_preset=str(data.get("selected_preset", fallback_name)).strip() or fallback_name,
+            auto_check_updates=_coerce_bool(data.get("auto_check_updates", False), False),
             last_settings=AppSettings.from_dict(data.get("last_settings")),
             overlay=OverlaySettings.from_dict(data.get("overlay")),
             presets=presets,
@@ -614,6 +628,15 @@ def validate_settings(settings: AppSettings, language: str | None = None) -> Val
         result.add(tr(locale_key, "validation.hotkeys_must_differ"), "toggle_hotkey")
         result.add(tr(locale_key, "validation.hotkeys_must_differ"), "exit_hotkey")
 
+    emergency_hotkey = EMERGENCY_STOP_HOTKEY.normalized()
+    if normalized.toggle_hotkey.normalized() == emergency_hotkey:
+        result.add(tr(locale_key, "validation.hotkey_reserved_emergency"), "toggle_hotkey")
+    if normalized.exit_hotkey.normalized() == emergency_hotkey:
+        result.add(tr(locale_key, "validation.hotkey_reserved_emergency"), "exit_hotkey")
+
+    if normalized.safety_countdown_seconds < 0 or normalized.safety_countdown_seconds > 30:
+        result.add(tr(locale_key, "validation.safety_countdown_range"), "safety_countdown_seconds")
+
     if not normalized.actions:
         result.add(tr(locale_key, "validation.action_required"))
         return result
@@ -667,6 +690,8 @@ def validate_settings(settings: AppSettings, language: str | None = None) -> Val
                 result.add(tr(locale_key, "validation.keyboard_equals_toggle"), prefix + "action_key")
             if action.action_key.normalized() == normalized.exit_hotkey.normalized():
                 result.add(tr(locale_key, "validation.keyboard_equals_exit"), prefix + "action_key")
+            if action.action_key.normalized() == emergency_hotkey:
+                result.add(tr(locale_key, "validation.keyboard_equals_emergency"), prefix + "action_key")
 
         if action.action_mode == "mouse":
             if action.mouse_button not in MOUSE_BUTTON_CHOICES:

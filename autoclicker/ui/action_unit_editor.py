@@ -32,8 +32,8 @@ from autoclicker.models import (
     get_target_labels,
     validate_settings,
 )
+from autoclicker.input_backend import InputBackend, create_input_backend
 from autoclicker.ui.hotkey_edit import HotkeyLineEdit
-from autoclicker.win32_backend import get_cursor_position
 
 
 def _set_widget_error(widget: QWidget, message: str | None) -> None:
@@ -48,10 +48,18 @@ class ActionUnitEditor(QWidget):
     changed = Signal()
     cursor_read_failed = Signal()
 
-    def __init__(self, *, language: str | None = None, allow_infinite: bool = True, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        language: str | None = None,
+        allow_infinite: bool = True,
+        backend: InputBackend | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._language = normalize_language(language)
         self._allow_infinite = allow_infinite
+        self._backend = backend or create_input_backend()
         self._loading = False
 
         root_layout = QVBoxLayout(self)
@@ -465,7 +473,10 @@ class ActionUnitEditor(QWidget):
             _set_widget_error(widget, message)
 
     def _fill_current_cursor(self) -> None:
-        position = get_cursor_position()
+        try:
+            position = self._backend.get_cursor_position()
+        except OSError:
+            position = None
         if position is None:
             self.cursor_read_failed.emit()
             return
@@ -533,6 +544,7 @@ class ActionUnitDialog(QDialog):
         title: str,
         action: ActionUnit,
         allow_infinite: bool,
+        backend: InputBackend | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -541,7 +553,7 @@ class ActionUnitDialog(QDialog):
         self.resize(700, 760)
 
         layout = QVBoxLayout(self)
-        self.editor = ActionUnitEditor(language=self._language, allow_infinite=allow_infinite, parent=self)
+        self.editor = ActionUnitEditor(language=self._language, allow_infinite=allow_infinite, backend=backend, parent=self)
         self.editor.base_group.setTitle(tr(self._language, "group.quick_action"))
         self.editor.target_group.setTitle(tr(self._language, "field.target_mode"))
         self.editor.random_group.setTitle(tr(self._language, "field.random_interval"))

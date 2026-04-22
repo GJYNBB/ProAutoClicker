@@ -13,6 +13,10 @@ THEMES = {
         "focus": "#f97316",
         "primary": "#f97316",
         "primary_hover": "#ea580c",
+        "success": "#16a34a",
+        "success_bg": "#dcfce7",
+        "warning": "#d97706",
+        "warning_bg": "#fef3c7",
         "danger_bg": "#fff1f2",
         "danger_text": "#b42318",
         "danger_border": "#fda4af",
@@ -33,6 +37,10 @@ THEMES = {
         "focus": "#fb923c",
         "primary": "#f97316",
         "primary_hover": "#ea580c",
+        "success": "#22c55e",
+        "success_bg": "#16351f",
+        "warning": "#fbbf24",
+        "warning_bg": "#3d2f12",
         "danger_bg": "#38252a",
         "danger_text": "#fecdd3",
         "danger_border": "#6b3039",
@@ -93,7 +101,7 @@ QTabBar::tab:selected {{
 QGroupBox {{
     background: {palette["card"]};
     border: 1px solid {palette["border"]};
-    border-radius: 16px;
+    border-radius: 8px;
     margin-top: 18px;
     font-weight: 600;
     padding-top: 12px;
@@ -111,7 +119,7 @@ QGroupBox::title {{
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextBrowser, QListWidget {{
     background: {palette["card_alt"]};
     border: 1px solid {palette["border"]};
-    border-radius: 10px;
+    border-radius: 6px;
     min-height: 24px;
     padding: 6px 10px;
     selection-background-color: {palette["focus"]};
@@ -138,7 +146,7 @@ QListWidget::item:selected {{
 QPushButton {{
     background: {palette["card"]};
     border: 1px solid {palette["border"]};
-    border-radius: 10px;
+    border-radius: 8px;
     min-height: 28px;
     padding: 7px 14px;
     font-weight: 600;
@@ -163,6 +171,106 @@ QPushButton:disabled {{
     background: {palette["disabled_bg"]};
     color: {palette["disabled_text"]};
     border-color: {palette["border"]};
+}}
+QFrame#settingsCard, QFrame#statusPanel, QFrame#actionBar, QFrame#topBar {{
+    background: {palette["card"]};
+    border: 1px solid {palette["border"]};
+    border-radius: 8px;
+}}
+QLabel#cardTitle {{
+    font-size: 14pt;
+    font-weight: 700;
+    color: {palette["text"]};
+}}
+QFrame#collapsibleSection {{
+    background: transparent;
+    border: none;
+}}
+QPushButton#collapsibleToggle {{
+    background: {palette["card"]};
+    border: 1px solid {palette["border"]};
+    border-radius: 8px;
+    padding: 8px 12px;
+    text-align: left;
+}}
+QPushButton#collapsibleToggle:checked {{
+    border-color: {palette["focus"]};
+}}
+QFrame#statusPanel {{
+    background: {palette["card_alt"]};
+}}
+QLabel#stateIndicator {{
+    background: {palette["tab_inactive"]};
+    border-radius: 8px;
+    color: {palette["text"]};
+    font-size: 14pt;
+    font-weight: 700;
+    padding: 10px 12px;
+}}
+QLabel#stateIndicator[state_idle="true"] {{
+    background: {palette["tab_inactive"]};
+    color: {palette["text"]};
+}}
+QLabel#stateIndicator[state_running="true"] {{
+    background: {palette["success_bg"]};
+    color: {palette["success"]};
+    border: 1px solid {palette["success"]};
+}}
+QLabel#stateIndicator[state_paused="true"] {{
+    background: {palette["warning_bg"]};
+    color: {palette["warning"]};
+    border: 1px solid {palette["warning"]};
+}}
+QLabel#stateIndicator[state_countdown="true"] {{
+    background: {palette["danger_bg"]};
+    color: {palette["danger_text"]};
+    border: 1px solid {palette["danger_border"]};
+}}
+QFrame#statusSeparator {{
+    color: {palette["border"]};
+}}
+QLabel#statusFieldLabel {{
+    color: {palette["muted"]};
+    font-size: 9pt;
+}}
+QLabel#statusFieldValue {{
+    color: {palette["text"]};
+    font-weight: 600;
+}}
+QFrame#actionBar {{
+    border-radius: 8px;
+}}
+QLabel#validationLabel {{
+    color: {palette["danger_text"]};
+    font-size: 9pt;
+}}
+QLabel#validationLabel[severity="warning"] {{
+    color: {palette["warning"]};
+}}
+QLabel#validationLabel[severity="success"] {{
+    color: {palette["success"]};
+}}
+QWidget#taskSelector {{
+    background: transparent;
+}}
+QPushButton#taskSegment {{
+    background: {palette["tab_inactive"]};
+    border: 1px solid {palette["border"]};
+    border-radius: 8px;
+    color: {palette["muted"]};
+    min-height: 36px;
+    padding: 8px 14px;
+}}
+QPushButton#taskSegment:checked {{
+    background: {palette["primary"]};
+    border-color: {palette["primary"]};
+    color: #ffffff;
+}}
+QPushButton#taskSegment:hover {{
+    border-color: {palette["focus"]};
+}}
+QPushButton#topBarIconButton {{
+    min-width: 40px;
 }}
 QCheckBox {{
     spacing: 8px;

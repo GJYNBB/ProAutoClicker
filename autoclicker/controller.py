@@ -3,20 +3,13 @@ from __future__ import annotations
 import random
 import threading
 import time
+from datetime import datetime
 
 from PySide6.QtCore import QObject, Signal
 
+from autoclicker.input_backend import InputBackend, create_input_backend
 from autoclicker.i18n import detect_system_language, normalize_language, tr
 from autoclicker.models import AppSettings, ActionUnit, format_action_unit_label
-from autoclicker.win32_backend import (
-    click_mouse,
-    get_cursor_position,
-    key_combo_down,
-    key_combo_up,
-    mouse_down,
-    mouse_up,
-    send_key_combo,
-)
 
 
 class AutomationController(QObject):
@@ -27,9 +20,11 @@ class AutomationController(QObject):
     action_count_changed = Signal(int)
     actual_frequency_changed = Signal(float)
     current_step_changed = Signal(int, str)
+    last_action_changed = Signal(str)
 
-    def __init__(self) -> None:
+    def __init__(self, backend: InputBackend | None = None) -> None:
         super().__init__()
+        self._backend = backend or create_input_backend()
         self._state = "idle"
         self._worker: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
@@ -55,6 +50,7 @@ class AutomationController(QObject):
             self._run_started_at = None
             self._emit_runtime_metrics(force_zero=True)
             self.current_step_changed.emit(-1, "")
+            self.last_action_changed.emit("")
             self._stop_event = threading.Event()
             session_settings = AppSettings.from_dict(settings.to_dict())
             self._worker = threading.Thread(
@@ -80,6 +76,7 @@ class AutomationController(QObject):
             stop_event.set()
         self._emit_runtime_metrics(force_zero=True)
         self.current_step_changed.emit(-1, "")
+        self.last_action_changed.emit("")
         self._set_state("idle", tr(self._language, "status.ready"))
 
     def toggle(self, settings: AppSettings, language: str | None = None) -> None:
@@ -113,7 +110,13 @@ class AutomationController(QObject):
                         )
                     )
                     self._set_state("running", tr(language, "controller.running", action=step_label))
-                    self._execute_action_unit(action, index, stop_event, language)
+                    self._execute_action_unit(
+                        action,
+                        index,
+                        stop_event,
+                        language,
+                        settings.safety_countdown_seconds,
+                    )
                 if stop_event.is_set():
                     break
                 if settings.sequence_mode == "once":
@@ -139,6 +142,7 @@ class AutomationController(QObject):
         index: int,
         stop_event: threading.Event,
         language: str,
+        safety_countdown_seconds: float = 0.0,
     ) -> None:
         target: tuple[int, int] | None = None
         if action.action_mode == "mouse":
@@ -153,6 +157,9 @@ class AutomationController(QObject):
         last_metrics_emit = started_at
 
         while not stop_event.is_set():
+            if safety_countdown_seconds > 0 and self._safety_countdown(safety_countdown_seconds, stop_event, language):
+                return
+
             if action.action_mode == "mouse":
                 assert target is not None
                 x, y = self._apply_jitter(target, action)
@@ -162,6 +169,14 @@ class AutomationController(QObject):
 
             executed += 1
             self._action_count += 1
+            self.last_action_changed.emit(
+                tr(
+                    language,
+                    "controller.last_action",
+                    time=datetime.now().strftime("%H:%M:%S"),
+                    count=self._action_count,
+                )
+            )
             now = time.perf_counter()
             if now - last_metrics_emit >= 0.25:
                 self._emit_runtime_metrics(now=now)
@@ -223,7 +238,7 @@ class AutomationController(QObject):
                 if remaining <= 0:
                     break
                 time.sleep(min(remaining, 0.05))
-        return get_cursor_position()
+        return self._backend.get_cursor_position()
 
     def _perform_mouse_action(
         self,
@@ -233,18 +248,18 @@ class AutomationController(QObject):
         stop_event: threading.Event,
     ) -> None:
         if action.mouse_interaction == "hold":
-            mouse_down(action.mouse_button, x, y)
+            self._backend.mouse_down(action.mouse_button, x, y)
             try:
                 self._wait(self._effective_hold_seconds(action), stop_event)
             finally:
-                mouse_up(action.mouse_button)
+                self._backend.mouse_up(action.mouse_button)
             return
 
         repeat = {"single": 1, "double": 2, "triple": 3}.get(action.mouse_interaction, 1)
         for click_index in range(repeat):
             if stop_event.is_set():
                 return
-            click_mouse(action.mouse_button, x, y)
+            self._backend.click_mouse(action.mouse_button, x, y)
             if click_index < repeat - 1:
                 self._wait(0.04, stop_event)
 
@@ -256,14 +271,30 @@ class AutomationController(QObject):
     ) -> None:
         hold_seconds = self._effective_hold_seconds(action)
         if hold_seconds <= 0.03:
-            send_key_combo(action.action_key, language)
+            self._backend.send_key_combo(action.action_key, language)
             return
 
-        key_combo_down(action.action_key, language)
+        self._backend.key_combo_down(action.action_key, language)
         try:
             self._wait(hold_seconds, stop_event)
         finally:
-            key_combo_up(action.action_key, language)
+            self._backend.key_combo_up(action.action_key, language)
+
+    def _safety_countdown(self, delay_seconds: float, stop_event: threading.Event, language: str) -> bool:
+        end_time = time.perf_counter() + max(delay_seconds, 0.0)
+        last_announce = None
+        while True:
+            if stop_event.is_set():
+                return True
+            remaining = max(end_time - time.perf_counter(), 0.0)
+            remaining_int = int(remaining + 0.999)
+            if remaining_int > 0 and remaining_int != last_announce:
+                self.status_changed.emit(tr(language, "controller.safety_countdown", seconds=remaining_int))
+                last_announce = remaining_int
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 0.05))
+        return stop_event.is_set()
 
     def _effective_interval_seconds(self, action: ActionUnit) -> float:
         if action.random_interval_enabled:
